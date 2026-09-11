@@ -1,7 +1,8 @@
 
-import { doc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { SyncService } from './SyncService';
+import { notifyAdminPaymentProcessed, notifyParentPaymentConfirmed } from './adminNotifications';
 
 /**
  * Calcula o status financeiro do aluno baseado na lista de pagamentos.
@@ -157,6 +158,14 @@ export const calculateStatusFromPayments = (payments: any[]) => {
 
     const financialLastPaymentValue = lastPayment ? (lastPayment.value || 0) : 0;
 
+    // Pendências restantes (atrasadas + a vencer), pro cartão de pagamento identificado
+    // poder mostrar o que ainda falta pagar depois desse pagamento.
+    const remainingUnpaid = [...overdue, ...pending].map(p => ({
+        description: p.description || 'Mensalidade',
+        dueDate: p.dueDate,
+        isOverdue: overdue.includes(p),
+    }));
+
     return {
         status: newStatus,
         financialPendingAmount: pendingAmount,
@@ -168,7 +177,9 @@ export const calculateStatusFromPayments = (payments: any[]) => {
         financialReceivedLastMonth: receivedLastMonth,
         financialPendingThisMonth: pendingThisMonth,
         financialPendingLastMonth: pendingLastMonth,
-        financialLastPaymentValue: financialLastPaymentValue
+        financialLastPaymentValue: financialLastPaymentValue,
+        lastPayment,
+        remainingUnpaid,
     };
 };
 
@@ -307,6 +318,36 @@ export const syncStudentFinancialData = async (
 
         // 5. Update Registration Doc
         const regRef = doc(db, 'uba_2026_registrations', registrationId);
+
+        // Detecta transição para "pago" (evita reenviar aviso em toda re-sincronização)
+        const prevSnap = await getDoc(regRef).catch(() => null);
+        const previousStatus = prevSnap?.exists() ? prevSnap.data().status : undefined;
+        if (statusData.status === 'pago' && previousStatus !== 'pago') {
+            const prevData = prevSnap?.exists() ? prevSnap.data() : undefined;
+            const lastPayment = statusData.lastPayment;
+
+            notifyAdminPaymentProcessed({
+                studentId: registrationId,
+                nome: studentFullName,
+                modalidade: prevData?.modalidade,
+                fotoUrl: prevData?.alunos?.[0]?.fotoUrl,
+                payerNome: prevData?.responsavel?.nome,
+                valor: statusData.financialLastPaymentValue || undefined,
+                description: lastPayment?.description,
+                dueDate: lastPayment?.dueDate,
+                paymentDate: lastPayment?.paymentDate || lastPayment?.clientPaymentDate || lastPayment?.dueDate,
+                billingType: lastPayment?.billingType,
+                remainingDebts: statusData.remainingUnpaid,
+            }).catch(err => console.error('Falha ao notificar admin sobre pagamento processado:', err));
+
+            const responsavelPhone = prevData?.responsavel?.telefonePrincipal;
+            notifyParentPaymentConfirmed({
+                phone: responsavelPhone,
+                nome: studentFullName,
+                valor: statusData.financialLastPaymentValue || undefined
+            }).catch(err => console.error('Falha ao notificar responsável sobre pagamento processado:', err));
+        }
+
         await updateDoc(regRef, {
             status: statusData.status,
             financialPendingAmount: statusData.financialPendingAmount,

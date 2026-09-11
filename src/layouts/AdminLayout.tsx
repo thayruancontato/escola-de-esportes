@@ -100,10 +100,10 @@ export default function AdminLayout() {
     useEffect(() => {
         const checkAuth = async () => {
             const localAuth = localStorage.getItem('uba_admin_auth');
-            if (!localAuth) navigate('/admin/login');
+            if (!localAuth) navigate('/admin/login', { state: { from: location.pathname + location.search } });
         };
         checkAuth();
-    }, [navigate]);
+    }, [navigate, location.pathname, location.search]);
 
     const handleLogout = async () => {
         await signOut(auth);

@@ -1,10 +1,8 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import * as xlsx from 'xlsx';
 import { collection, getDocs, doc, writeBatch, query, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useDialog } from '../context/CustomDialogContext';
-import { Clock } from 'lucide-react';
 import PageTitle from '../components/PageTitle';
 import PageContainer from '../components/PageContainer';
 
@@ -30,7 +28,6 @@ export default function AdminWhatsApp() {
     const [sending, setSending] = useState(false);
     const [progress, setProgress] = useState({ current: 0, total: 0 });
     const [searchTerm, setSearchTerm] = useState('');
-    const navigate = useNavigate();
 
     useEffect(() => {
         loadContacts();
@@ -324,23 +321,6 @@ Dúvidas? Entre em contato: +55 33 8414-4053 ⚽🏀`;
                     {data.length > 0 && (
                         <>
                             <div style={{ flex: 1, textAlign: 'right', display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-                                <button
-                                    onClick={() => navigate('/admin/mensagens/automacao')}
-                                    style={{
-                                        padding: '12px 24px',
-                                        background: '#fff',
-                                        border: '2px solid #006d77',
-                                        color: '#006d77',
-                                        borderRadius: '8px',
-                                        cursor: 'pointer',
-                                        fontWeight: 'bold',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px'
-                                    }}
-                                >
-                                    <Clock size={18} /> Automação Financeira
-                                </button>
                                 <button
                                     onClick={() => handleSend(true)}
                                     disabled={sending || selectedIds.size === 0}

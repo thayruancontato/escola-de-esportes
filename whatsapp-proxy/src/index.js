@@ -1,6 +1,8 @@
 /**
  * Cloudflare Worker: Proxy para Evolution API v2 + Armazenamento de Imagens + Fila de Mensagens
  */
+import { RESUMO_ADMIN_JPEG_BASE64 } from "./assets/resumoAdminImage.js";
+import { PAGAMENTO_JPEG_BASE64 } from "./assets/pagamentoIdentificadoImage.js";
 
 const EVOLUTION_URL = "https://evolution-api-im3d.onrender.com";
 const ASAAS_URL = "https://api.asaas.com/v3";
@@ -221,6 +223,253 @@ export default {
       }
     }
 
+    // --- WHATSAPP HUB (proxy) ---
+    // A chave do hub fica só aqui no servidor - o admin nunca chama o hub direto do navegador.
+    // Usa Service Binding (não fetch por URL pública - Workers não podem se chamar via
+    // *.workers.dev entre si, a Cloudflare bloqueia isso com o erro 1042).
+    if (path === "/hub/messages" && request.method === "POST") {
+      if (!env.WHATSAPP_HUB || !env.WHATSAPP_HUB_API_KEY) {
+        return jsonResponse({ error: "WhatsApp Hub não configurado." }, 500, corsHeaders);
+      }
+      try {
+        const body = await request.json().catch(() => ({}));
+        const hubRes = await env.WHATSAPP_HUB.fetch("https://whatsapp-hub.internal/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.WHATSAPP_HUB_API_KEY}` },
+          body: JSON.stringify(body)
+        });
+        const hubBody = await hubRes.json().catch(() => ({}));
+        return jsonResponse(hubBody, hubRes.status, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // Prévia da imagem de um card template do hub (não envia nada, só renderiza o PNG).
+    const hubPreviewMatch = path.match(/^\/hub\/templates\/([^/]+)\/preview$/);
+    if (hubPreviewMatch && request.method === "POST") {
+      if (!env.WHATSAPP_HUB || !env.WHATSAPP_HUB_API_KEY) {
+        return jsonResponse({ error: "WhatsApp Hub não configurado." }, 500, corsHeaders);
+      }
+      try {
+        const body = await request.json().catch(() => ({}));
+        const hubRes = await env.WHATSAPP_HUB.fetch(`https://whatsapp-hub.internal/v1/templates/${hubPreviewMatch[1]}/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.WHATSAPP_HUB_API_KEY}` },
+          body: JSON.stringify(body)
+        });
+        const contentType = hubRes.headers.get("Content-Type") || "image/png";
+        const buf = await hubRes.arrayBuffer();
+        return new Response(buf, { status: hubRes.status, headers: { ...corsHeaders, "Content-Type": contentType } });
+      } catch (err) {
+        return jsonResponse({ error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // --- RESUMO DIÁRIO AO ADMINISTRADOR (teste manual + prévia) ---
+    // O envio automático real acontece no cron (scheduled -> handleDailySummaryFlow),
+    // essas duas rotas só existem pra página de configuração poder testar/pré-visualizar.
+    if (path === "/daily-summary-trigger" && request.method === "POST") {
+      try {
+        const body = await request.json().catch(() => ({}));
+        const dateStr = body.testDate || yesterdayStr(spDateParts(spNow()).dateStr);
+        const result = await sendDailySummary(env, { dateStr, phone: body.testPhone });
+        return jsonResponse(result, result.success ? 200 : 500, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    if (path === "/daily-summary-preview" && request.method === "GET") {
+      try {
+        const dateStr = url.searchParams.get("date") || yesterdayStr(spDateParts(spNow()).dateStr);
+        const text = await buildDailySummaryText(env, dateStr);
+        return jsonResponse({ success: true, text, imageUrl: getDailySummaryImageDataUri() }, 200, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // --- LEMBRETES DE PAGAMENTO AOS RESPONSÁVEIS (novo sistema, substitui a automação antiga) ---
+    // Prévia/teste sempre usam um aluno real aprovado aleatório com fatura real batendo com a
+    // regra, mas o destino final SEMPRE passa por resolveParentPhone (toggle de segurança).
+    if (path === "/payment-reminder-preview" && request.method === "GET") {
+      try {
+        const rule = url.searchParams.get("rule");
+        if (!["BEFORE", "ONDAY", "AFTER"].includes(rule)) {
+          return jsonResponse({ success: false, error: "Parâmetro 'rule' inválido." }, 400, corsHeaders);
+        }
+        const config = await fetchAdminNotificationsConfig(env);
+        // Habilita temporariamente só a regra pedida, pra prévia funcionar mesmo se a regra
+        // ainda estiver desligada na config (o admin quer ver como fica antes de ativar).
+        const previewConfig = {
+          ...config,
+          paymentReminderBeforeEnabled: rule === "BEFORE",
+          paymentReminderOnDayEnabled: rule === "ONDAY",
+          paymentReminderAfterEnabled: rule === "AFTER",
+        };
+        const nowParts = spDateParts(spNow());
+        const activePayments = await findMatchingPaymentReminders(env, nowParts.dateStr, previewConfig);
+        if (activePayments.length === 0) {
+          return jsonResponse({ success: true, text: null, studentName: null, message: "Nenhuma fatura real bate com essa regra hoje." }, 200, corsHeaders);
+        }
+        const studentsMap = await fetchApprovedStudentsMap(env);
+        const eligible = activePayments
+          .map(p => ({ p, fields: studentsMap[p.studentId] }))
+          .filter(x => x.fields)
+          .map(x => ({ p: x.p, info: studentInfoFromFields(x.fields) }))
+          .filter(x => x.info.contractStatus === "aprovado" && x.info.phoneRaw);
+        if (eligible.length === 0) {
+          return jsonResponse({ success: true, text: null, studentName: null, message: "Nenhum aluno aprovado com telefone bate com essa regra hoje." }, 200, corsHeaders);
+        }
+        const pick = eligible[Math.floor(Math.random() * eligible.length)];
+        const text = buildPaymentReminderText(pick.p, pick.info.nome);
+        return jsonResponse({ success: true, text, studentName: pick.info.nome }, 200, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    if (path === "/payment-reminder-test" && request.method === "POST") {
+      try {
+        const body = await request.json().catch(() => ({}));
+        const rule = body.rule;
+        if (!["BEFORE", "ONDAY", "AFTER"].includes(rule)) {
+          return jsonResponse({ success: false, error: "Parâmetro 'rule' inválido." }, 400, corsHeaders);
+        }
+        const config = await fetchAdminNotificationsConfig(env);
+        const testConfig = {
+          ...config,
+          paymentReminderBeforeEnabled: rule === "BEFORE",
+          paymentReminderOnDayEnabled: rule === "ONDAY",
+          paymentReminderAfterEnabled: rule === "AFTER",
+        };
+        const nowParts = spDateParts(spNow());
+        const result = await runPaymentReminderBatch(env, { virtualTodayStr: nowParts.dateStr, config: testConfig, isTest: true, onlyRule: rule });
+        if (!result.sample) {
+          return jsonResponse({ success: false, error: "Nenhuma fatura real de aluno aprovado bate com essa regra hoje - não há dados reais pra simular o teste." }, 200, corsHeaders);
+        }
+        return jsonResponse({ success: result.sample.sent, ...result.sample }, 200, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // Confirmação de pagamento identificado, enviada ao responsável (além do aviso ao admin,
+    // que continua indo pelo hub). Chamado pelo cliente assim que um pagamento é detectado.
+    if (path === "/notify-parent-payment" && request.method === "POST") {
+      try {
+        const body = await request.json().catch(() => ({}));
+        const { phone, nome, valor } = body;
+        if (!phone) return jsonResponse({ success: false, error: "Telefone do responsável não informado." }, 400, corsHeaders);
+
+        const config = await fetchAdminNotificationsConfig(env);
+        const valorTexto = typeof valor === "number" ? ` no valor de *${formatBRLServer(valor)}*` : "";
+        const text = `✅ *PAGAMENTO CONFIRMADO*\n\nOlá! Confirmamos o recebimento do seu pagamento${valorTexto}, referente ao(à) aluno(a) *${(nome || "aluno").toUpperCase()}*.\n\nObrigado por manter a mensalidade em dia! 🙌`;
+
+        const { phone: destino, redirected } = resolveParentPhone(config, phone);
+        const result = await sendParentMessage(env, destino, text);
+        return jsonResponse({ success: result.success, redirected, error: result.error }, result.success ? 200 : 500, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // Webhook real do Asaas - dispara SOZINHO assim que um pagamento é recebido/confirmado,
+    // sem depender de ninguém abrir o app (portal do aluno, portaria, painel financeiro etc).
+    // É a única fonte de verdade confiável pro aviso de "pagamento identificado".
+    if (path === "/asaas-webhook" && request.method === "POST") {
+      try {
+        const authHeader = request.headers.get("asaas-access-token") || request.headers.get("Asaas-Access-Token");
+        if (!env.ASAAS_WEBHOOK_TOKEN || authHeader !== env.ASAAS_WEBHOOK_TOKEN) {
+          return jsonResponse({ success: false, error: "unauthorized" }, 401, corsHeaders);
+        }
+
+        const body = await request.json().catch(() => ({}));
+        const eventName = body.event;
+        const payment = body.payment;
+        const PAID_EVENTS = ["PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"];
+
+        if (!PAID_EVENTS.includes(eventName) || !payment?.id) {
+          return jsonResponse({ success: true, ignored: true }, 200, corsHeaders);
+        }
+
+        // Idempotência - a Asaas pode reenviar o mesmo evento; nunca notifica duas vezes.
+        const dedupeKey = `asaas_webhook_notified:${payment.id}`;
+        const already = await env.UBA_STORAGE.get(dedupeKey);
+        if (already) return jsonResponse({ success: true, deduped: true }, 200, corsHeaders);
+
+        const result = await processAsaasPaymentWebhook(env, payment);
+        if (result.notified) {
+          await env.UBA_STORAGE.put(dedupeKey, "true", { expirationTtl: 86400 * 60 });
+        }
+        return jsonResponse(result, 200, corsHeaders);
+      } catch (err) {
+        console.error("Erro no webhook Asaas:", err);
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // Conta quantos lembretes seriam disparados HOJE com as regras/dias informados (rascunho
+    // ainda não salvo) - alimenta o "X mensagens serão enviadas" da página de configuração.
+    if (path === "/payment-reminder-count" && request.method === "POST") {
+      try {
+        const body = await request.json().catch(() => ({}));
+        const draftConfig = {
+          paymentReminderBeforeEnabled: !!body.paymentReminderBeforeEnabled,
+          paymentReminderBeforeDays: Number(body.paymentReminderBeforeDays) || 3,
+          paymentReminderOnDayEnabled: !!body.paymentReminderOnDayEnabled,
+          paymentReminderAfterEnabled: !!body.paymentReminderAfterEnabled,
+          paymentReminderAfterDays: Number(body.paymentReminderAfterDays) || 5,
+        };
+        const nowParts = spDateParts(spNow());
+        const activePayments = await findMatchingPaymentReminders(env, nowParts.dateStr, draftConfig);
+        if (activePayments.length === 0) return jsonResponse({ success: true, count: 0, byRule: {} }, 200, corsHeaders);
+
+        const studentsMap = await fetchApprovedStudentsMap(env);
+        const byRule = { BEFORE: 0, ONDAY: 0, AFTER: 0 };
+        let count = 0;
+        for (const p of activePayments) {
+          const fields = studentsMap[p.studentId];
+          if (!fields) continue;
+          const info = studentInfoFromFields(fields);
+          if (info.contractStatus !== "aprovado" || !info.phoneRaw) continue;
+          count++;
+          byRule[p.ruleMatched] = (byRule[p.ruleMatched] || 0) + 1;
+        }
+        return jsonResponse({ success: true, count, byRule }, 200, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
+    // Histórico dos últimos lembretes de pagamento realmente disparados (nome + foto do
+    // aluno), pra aba de Histórico da página de Avisos ao Administrador.
+    if (path === "/payment-reminder-history" && request.method === "GET") {
+      try {
+        const listUrl = `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/payment_reminder_logs?key=${env.FIREBASE_API_KEY}&pageSize=50&orderBy=${encodeURIComponent("sentAt desc")}`;
+        const res = await fetch(listUrl);
+        if (!res.ok) return jsonResponse({ success: true, items: [] }, 200, corsHeaders);
+        const data = await res.json();
+        const items = (data.documents || []).map(d => {
+          const f = d.fields || {};
+          return {
+            studentName: fsFieldValue(f.studentName) || "",
+            studentPhoto: fsFieldValue(f.studentPhoto) || "",
+            rule: fsFieldValue(f.rule) || "",
+            phone: fsFieldValue(f.phone) || "",
+            redirected: fsFieldValue(f.redirected) || false,
+            success: fsFieldValue(f.success) || false,
+            isTest: fsFieldValue(f.isTest) || false,
+            sentAt: f.sentAt?.timestampValue || "",
+          };
+        });
+        return jsonResponse({ success: true, items }, 200, corsHeaders);
+      } catch (err) {
+        return jsonResponse({ success: false, error: err.message }, 500, corsHeaders);
+      }
+    }
+
     // --- ENDPOINTS DE GESTÃO DE FILA ---
     if (path === "/queue/list" && request.method === "GET") {
       const list = await env.UBA_STORAGE.list({ prefix: "mq:pending:", limit: 100 });
@@ -278,41 +527,6 @@ export default {
       }
     }
 
-    // --- ENDPOINT DE GATILHO MANUAL DE AUTOMAÇÃO FINANCEIRA ---
-    if (path === "/financial-automation-trigger" && request.method === "POST") {
-      try {
-        const { testDate, testPhone } = await request.json();
-        const dateToProcess = testDate || new Date().toISOString().split('T')[0];
-        
-        console.log(`[Manual Trigger] Processando para data: ${dateToProcess}, Fone: ${testPhone}`);
-        
-        // Fetch full config to avoid overwriting enabled toggles with undefined
-        const configRes = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/system_settings/whatsapp?key=${env.FIREBASE_API_KEY}`);
-        const configData = await configRes.json();
-        const fullConfig = configData.fields || {};
-        
-        // Se um telefone foi passado, substituímos temporariamente a config
-        if (testPhone) {
-           fullConfig.testPhone = { stringValue: testPhone };
-           fullConfig.finAutoTestMode = { booleanValue: true };
-        }
-        
-        const count = await processFinancialAutomation(env, dateToProcess, true, fullConfig);
-        
-        const resultMsg = count > 0 
-          ? `Sucesso: ${count} mensagens enviadas para a data ${dateToProcess}.` 
-          : `Processado: Nenhuma fatura pendente encontrada para as regras na data ${dateToProcess}.`;
-
-        return new Response(JSON.stringify({ success: true, count, message: resultMsg }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      }
-    }
 
     // --- ENDPOINT DE UPLOAD VIA FORMDATA (usado pelo PublicForm) ---
     if (path === "/images/upload" && request.method === "POST") {
@@ -533,7 +747,7 @@ export default {
 
     // --- PROXY PARA EVOLUTION API ---
     try {
-      let targetUrl = `${EVOLUTION_URL}${path}`;
+      let targetUrl = `${EVOLUTION_URL}${path}${url.search || ""}`;
       if (path === "/send") targetUrl = `${EVOLUTION_URL}/message/sendText/${INSTANCE_NAME}`;
 
       const headers = new Headers();
@@ -581,10 +795,722 @@ export default {
     // 2. Processa Automação de Aniversários
     await processBirthdays(env);
 
-    // 3. Processa Automação Financeira (Cobranças)
-    await handleFinancialAutomationFlow(env);
+    // 3. Processa o Resumo Diário ao Administrador (horário configurável)
+    await handleDailySummaryFlow(env);
+
+    // 4. Processa os Lembretes de Pagamento aos Responsáveis (horário configurável)
+    await handlePaymentReminderFlow(env);
   }
 };
+
+/**
+ * Gerencia o disparo automático do resumo diário ao administrador, respeitando o
+ * horário configurado (dailySummaryTime). Sempre resume o dia ANTERIOR completo
+ * (00:00 às 23:59), já que só roda depois que esse dia já terminou de verdade.
+ */
+async function handleDailySummaryFlow(env) {
+  try {
+    const config = await fetchAdminNotificationsConfig(env);
+    if (!config.dailySummaryEnabled || !config.adminPhone) return;
+
+    const nowParts = spDateParts(spNow());
+    const sendTime = config.dailySummaryTime || "09:00";
+    const lastRun = await env.UBA_STORAGE.get(`daily_summary_run:${nowParts.dateStr}`);
+
+    if (nowParts.timeStr >= sendTime && !lastRun) {
+      const targetDateStr = yesterdayStr(nowParts.dateStr);
+      await sendDailySummary(env, { dateStr: targetDateStr, phone: config.adminPhone });
+      await env.UBA_STORAGE.put(`daily_summary_run:${nowParts.dateStr}`, "done", { expirationTtl: 86400 * 7 });
+    }
+  } catch (e) {
+    console.error("Erro no fluxo do resumo diário:", e);
+  }
+}
+
+// --- Helpers de data/hora no fuso de São Paulo (mesmo truque de deslocar -3h já usado
+// no fluxo financeiro acima, sem depender de Intl/timeZone dentro do Worker). ---
+function spNow() {
+  return new Date(Date.now() - 3 * 3600 * 1000);
+}
+
+function spDateParts(spShiftedDate) {
+  const y = spShiftedDate.getUTCFullYear();
+  const m = String(spShiftedDate.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(spShiftedDate.getUTCDate()).padStart(2, "0");
+  const hh = String(spShiftedDate.getUTCHours()).padStart(2, "0");
+  const mm = String(spShiftedDate.getUTCMinutes()).padStart(2, "0");
+  return { dateStr: `${y}-${m}-${d}`, timeStr: `${hh}:${mm}` };
+}
+
+function yesterdayStr(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  return dt.toISOString().split("T")[0];
+}
+
+function ymdToDisplay(dateStr) {
+  const [y, m, d] = dateStr.split("-");
+  return `${d}/${m}/${y}`;
+}
+
+function fsFieldValue(field) {
+  if (!field) return undefined;
+  if ("stringValue" in field) return field.stringValue;
+  if ("doubleValue" in field) return field.doubleValue;
+  if ("integerValue" in field) return Number(field.integerValue);
+  if ("booleanValue" in field) return field.booleanValue;
+  return undefined;
+}
+
+function normalizeAdminPhoneServer(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  return digits.startsWith("55") ? digits : `55${digits}`;
+}
+
+function formatBRLServer(value) {
+  return (value || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+function parseLocalDateStrServer(dateStr) {
+  if (!dateStr) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    const [y, m, d] = dateStr.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+async function fetchAdminNotificationsConfig(env) {
+  const fallback = {
+    adminPhone: "", dailySummaryEnabled: false, dailySummaryTime: "09:00",
+    redirectParentMessagesToAdmin: true,
+    paymentReminderBeforeEnabled: false, paymentReminderBeforeDays: 3,
+    paymentReminderOnDayEnabled: false,
+    paymentReminderAfterEnabled: false, paymentReminderAfterDays: 5,
+    paymentReminderSendTime: "09:00", paymentReminderSendEndTime: "18:00", paymentReminderIntervalSeconds: 5,
+  };
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/system_settings/admin_notifications?key=${env.FIREBASE_API_KEY}`);
+  if (!res.ok) return fallback;
+  const doc = await res.json();
+  const f = doc.fields || {};
+  return {
+    adminPhone: f.adminPhone?.stringValue || "",
+    notifyOnRegistration: f.notifyOnRegistration?.booleanValue || false,
+    notifyOnPayment: f.notifyOnPayment?.booleanValue || false,
+    dailySummaryEnabled: f.dailySummaryEnabled?.booleanValue || false,
+    dailySummaryTime: f.dailySummaryTime?.stringValue || "09:00",
+    // Toggle de segurança global: enquanto true, TODO envio que seria destinado a um
+    // responsável (lembretes de pagamento + confirmação de pagamento identificado) é
+    // redirecionado para o número do admin. Nunca deve ser ignorado - ver resolveParentPhone.
+    redirectParentMessagesToAdmin: f.redirectParentMessagesToAdmin?.booleanValue !== false,
+    paymentReminderBeforeEnabled: f.paymentReminderBeforeEnabled?.booleanValue || false,
+    paymentReminderBeforeDays: f.paymentReminderBeforeDays?.integerValue !== undefined ? Number(f.paymentReminderBeforeDays.integerValue) : 3,
+    paymentReminderOnDayEnabled: f.paymentReminderOnDayEnabled?.booleanValue || false,
+    paymentReminderAfterEnabled: f.paymentReminderAfterEnabled?.booleanValue || false,
+    paymentReminderAfterDays: f.paymentReminderAfterDays?.integerValue !== undefined ? Number(f.paymentReminderAfterDays.integerValue) : 5,
+    paymentReminderSendTime: f.paymentReminderSendTime?.stringValue || "09:00",
+    paymentReminderSendEndTime: f.paymentReminderSendEndTime?.stringValue || "18:00",
+    paymentReminderIntervalSeconds: f.paymentReminderIntervalSeconds?.integerValue !== undefined ? Number(f.paymentReminderIntervalSeconds.integerValue) : 5,
+  };
+}
+
+/**
+ * Único ponto de decisão de destino para QUALQUER mensagem que iria pra um responsável
+ * (lembretes de pagamento e confirmação de pagamento identificado). Enquanto o toggle de
+ * segurança estiver ligado, SEMPRE redireciona pro admin - nenhum código deve contornar isso.
+ */
+function resolveParentPhone(config, realPhone) {
+  if (config.redirectParentMessagesToAdmin) {
+    return { phone: normalizeAdminPhoneServer(config.adminPhone), redirected: true };
+  }
+  return { phone: normalizeAdminPhoneServer(realPhone), redirected: false };
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Envio imediato (fora da fila KV) pro responsável, usando a MESMA instância/número do hub
+ * já usada pelos avisos ao admin (não a antiga Evolution API direta, que fica desconectada). */
+async function sendParentMessage(env, phone, text) {
+  const result = await sendHubMessageServer(env, phone, text, undefined);
+  if (result.success) return { success: true };
+  return { success: false, error: result.error || result.body?.error || "Falha ao enviar via hub." };
+}
+
+// --- Webhook do Asaas: fonte de verdade automática do "pagamento identificado" ---
+
+async function fetchFirestoreDoc(env, collectionId, docId) {
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/${collectionId}/${docId}?key=${env.FIREBASE_API_KEY}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/** PATCH com updateMask = merge (igual ao `{merge:true}` do SDK client), sem apagar
+ * outros campos do documento. */
+async function upsertFirestoreDoc(env, collectionId, docId, fields) {
+  const maskParams = Object.keys(fields).map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+  const url = `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/${collectionId}/${docId}?key=${env.FIREBASE_API_KEY}&${maskParams}`;
+  await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fields })
+  });
+}
+
+async function fetchRemainingDebtsForStudent(env, studentId) {
+  const q = {
+    structuredQuery: {
+      from: [{ collectionId: "financial_payments" }],
+      where: {
+        compositeFilter: {
+          op: "AND",
+          filters: [
+            { fieldFilter: { field: { fieldPath: "studentId" }, op: "EQUAL", value: { stringValue: studentId } } },
+            { fieldFilter: { field: { fieldPath: "status" }, op: "IN", value: { arrayValue: { values: [{ stringValue: "PENDING" }, { stringValue: "OVERDUE" }] } } } }
+          ]
+        }
+      },
+      limit: 50
+    }
+  };
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery?key=${env.FIREBASE_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(q)
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  const items = data.filter(i => i.document).map(i => {
+    const f = i.document.fields || {};
+    return {
+      description: fsFieldValue(f.description) || "Mensalidade",
+      dueDate: fsFieldValue(f.dueDate) || "",
+      isOverdue: fsFieldValue(f.status) === "OVERDUE",
+    };
+  });
+  items.sort((a, b) => (a.dueDate || "").localeCompare(b.dueDate || ""));
+  return items;
+}
+
+function ymdToDisplayFlexible(dateStr) {
+  if (!dateStr) return "não informado";
+  const ymd = dateStr.substring(0, 10);
+  const parts = ymd.split("-");
+  return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : dateStr;
+}
+
+function buildPaymentWebhookText({ nome, modalidade, payerNome, payment, remaining }) {
+  const paidDateStr = payment.paymentDate || payment.clientPaymentDate || payment.dueDate;
+  let situacao = "";
+  if (payment.dueDate && paidDateStr) {
+    const due = new Date(payment.dueDate.substring(0, 10) + "T00:00:00");
+    const paid = new Date(paidDateStr.substring(0, 10) + "T00:00:00");
+    if (!isNaN(due.getTime()) && !isNaN(paid.getTime())) {
+      const late = Math.round((paid.getTime() - due.getTime()) / (1000 * 60 * 60 * 24));
+      situacao = late > 0 ? `Pago com ${late} dia${late === 1 ? "" : "s"} de atraso` : "Pago em dia";
+    }
+  }
+
+  const lines = [];
+  lines.push("✅ *PAGAMENTO IDENTIFICADO*");
+  lines.push("");
+  lines.push(`Pagador: *${(payerNome || "Responsável").toUpperCase()}*`);
+  lines.push(`Referente a: *${(nome || "Aluno").toUpperCase()}*${modalidade ? ` · ${modalidade.toUpperCase()}` : ""}`);
+  if (situacao) lines.push(`Situação: *${situacao.toUpperCase()}*`);
+  lines.push(`Referência: *${payment.description || "Mensalidade"}*`);
+  lines.push(`Forma de pagamento: *${billingTypeLabelServer(payment.billingType)}*`);
+  lines.push(`Vencimento: *${ymdToDisplayFlexible(payment.dueDate)}*`);
+  lines.push(`Pago em: *${ymdToDisplayFlexible(paidDateStr)}*`);
+  lines.push(`Valor pago: *${formatBRLServer(payment.value)}*`);
+
+  if (remaining.length === 0) {
+    lines.push("");
+    lines.push("✅ *SEM PENDÊNCIAS RESTANTES*");
+  } else {
+    lines.push("");
+    lines.push(`*PENDÊNCIAS RESTANTES (${remaining.length}):*`);
+    remaining.slice(0, 3).forEach(d => {
+      lines.push(`- ${d.description}${d.isOverdue ? " (atrasada)" : ""} - venc. ${ymdToDisplayFlexible(d.dueDate)}`);
+    });
+    if (remaining.length > 3) lines.push(`+ ${remaining.length - 3} outras`);
+  }
+
+  return lines.join("\n");
+}
+
+function billingTypeLabelServer(billingType) {
+  const bt = (billingType || "").toUpperCase();
+  if (bt === "PIX") return "PIX";
+  if (bt === "BOLETO") return "Boleto";
+  if (bt === "CREDIT_CARD") return "Cartão";
+  return billingType || "Não informado";
+}
+
+/** Recebe o objeto `payment` cru da Asaas (via webhook), descobre a qual aluno ele pertence,
+ * atualiza o cache do Firestore (mesmo sem nenhum cliente ter sincronizado) e dispara os
+ * avisos (admin + responsável), sem depender de ninguém ter aberto o app. */
+async function processAsaasPaymentWebhook(env, payment) {
+  // 1. Descobre o studentId - primeiro tenta o cache já existente do próprio pagamento,
+  // depois cai pro externalReference (formato "<registrationId>_...").
+  let studentId = null;
+  const cachedDoc = await fetchFirestoreDoc(env, "financial_payments", payment.id);
+  if (cachedDoc?.fields?.studentId?.stringValue) {
+    studentId = cachedDoc.fields.studentId.stringValue;
+  } else if (payment.externalReference) {
+    const candidateId = payment.externalReference.split("_")[0];
+    const regDoc = await fetchFirestoreDoc(env, "uba_2026_registrations", candidateId);
+    if (regDoc) studentId = candidateId;
+  }
+
+  if (!studentId) {
+    console.warn("[AsaasWebhook] Não foi possível identificar o aluno do pagamento", payment.id);
+    return { success: true, notified: false, reason: "student_not_found" };
+  }
+
+  // 2. Atualiza o cache do pagamento no Firestore (mesmo formato usado pelo SyncService).
+  await upsertFirestoreDoc(env, "financial_payments", payment.id, {
+    id: { stringValue: payment.id },
+    studentId: { stringValue: studentId },
+    customer: { stringValue: payment.customer || "" },
+    value: { doubleValue: payment.value || 0 },
+    dueDate: { stringValue: payment.dueDate || "" },
+    status: { stringValue: payment.status || "" },
+    description: { stringValue: payment.description || "" },
+    billingType: { stringValue: payment.billingType || "" },
+    paymentDate: { stringValue: payment.paymentDate || payment.clientPaymentDate || "" },
+    externalReference: { stringValue: payment.externalReference || "" },
+    lastUpdate: { stringValue: new Date().toISOString() },
+  });
+
+  // 3. Busca dados do aluno/responsável.
+  const regDoc = await fetchFirestoreDoc(env, "uba_2026_registrations", studentId);
+  if (!regDoc) return { success: true, notified: false, reason: "registration_not_found" };
+  const regFields = regDoc.fields || {};
+  const alunoFields = regFields.alunos?.arrayValue?.values?.[0]?.mapValue?.fields || {};
+  const nome = fsFieldValue(alunoFields.nome) || "Aluno";
+  const modalidade = fsFieldValue(regFields.modalidade) || "";
+  const responsavelFields = regFields.responsavel?.mapValue?.fields || {};
+  const payerNome = fsFieldValue(responsavelFields.nome) || "Responsável";
+  const responsavelPhone = fsFieldValue(responsavelFields.telefonePrincipal) || "";
+
+  // 4. Pendências restantes (o próprio pagamento já mudou de status, então some da lista sozinho).
+  const remaining = await fetchRemainingDebtsForStudent(env, studentId);
+
+  // 5. Aviso ao admin (imagem estática + texto rico, pra não depender de Canvas no Worker).
+  const config = await fetchAdminNotificationsConfig(env);
+  let notifiedAdmin = false;
+  if (config.notifyOnPayment && config.adminPhone) {
+    const text = buildPaymentWebhookText({ nome, modalidade, payerNome, payment, remaining });
+    const imageUrl = `data:image/jpeg;base64,${PAGAMENTO_JPEG_BASE64}`;
+    const sendResult = await sendHubMessageServer(env, normalizeAdminPhoneServer(config.adminPhone), text, imageUrl);
+    notifiedAdmin = sendResult.success;
+  }
+
+  // 6. Confirmação ao responsável (sempre passando pelo toggle de redirecionamento).
+  if (responsavelPhone) {
+    const valorTexto = typeof payment.value === "number" ? ` no valor de *${formatBRLServer(payment.value)}*` : "";
+    const parentText = `✅ *PAGAMENTO CONFIRMADO*\n\nOlá! Confirmamos o recebimento do seu pagamento${valorTexto}, referente ao(à) aluno(a) *${nome.toUpperCase()}*.\n\nObrigado por manter a mensalidade em dia! 🙌`;
+    const { phone: destino } = resolveParentPhone(config, responsavelPhone);
+    await sendParentMessage(env, destino, parentText);
+  }
+
+  return { success: true, notified: notifiedAdmin, studentId };
+}
+
+function parseFlexibleDate(dStr) {
+  if (!dStr) return null;
+  if (dStr.includes("/")) {
+    const [d, m, y] = dStr.split("/");
+    return new Date(`${y}-${m}-${d}T12:00:00`);
+  }
+  return new Date(dStr + "T12:00:00");
+}
+
+/** Busca faturas PENDING/OVERDUE e classifica pela regra (BEFORE/ONDAY/AFTER) batendo com os
+ * dias configurados, pra uma data de referência arbitrária (produção usa hoje; teste pode
+ * simular outro dia). */
+async function findMatchingPaymentReminders(env, virtualTodayStr, config) {
+  const paymentsQuery = {
+    structuredQuery: {
+      from: [{ collectionId: "financial_payments" }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "status" },
+          op: "IN",
+          value: { arrayValue: { values: [{ stringValue: "PENDING" }, { stringValue: "OVERDUE" }] } }
+        }
+      },
+      limit: 1000
+    }
+  };
+  const payRes = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery?key=${env.FIREBASE_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(paymentsQuery)
+  });
+  if (!payRes.ok) return [];
+  const payData = await payRes.json();
+
+  const today = parseFlexibleDate(virtualTodayStr);
+  const activePayments = [];
+  for (const item of payData) {
+    if (!item.document) continue;
+    const fields = item.document.fields || {};
+    const dueDateStr = fsFieldValue(fields.dueDate) || "";
+    const studentId = fsFieldValue(fields.studentId) || "";
+    const invoiceUrl = fsFieldValue(fields.invoiceUrl) || "";
+    const description = fsFieldValue(fields.description) || "Mensalidade";
+    if (!dueDateStr || !studentId) continue;
+
+    const due = parseFlexibleDate(dueDateStr);
+    if (!due || isNaN(due.getTime()) || !today || isNaN(today.getTime())) continue;
+
+    const diffDays = Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+    let ruleMatched = null;
+    if (diffDays <= config.paymentReminderBeforeDays && diffDays > 0 && config.paymentReminderBeforeEnabled) ruleMatched = "BEFORE";
+    else if (diffDays === 0 && config.paymentReminderOnDayEnabled) ruleMatched = "ONDAY";
+    else if (diffDays <= -config.paymentReminderAfterDays && diffDays < 0 && config.paymentReminderAfterEnabled) ruleMatched = "AFTER";
+
+    if (ruleMatched) {
+      activePayments.push({
+        paymentId: item.document.name.split("/").pop(),
+        studentId, dueDateStr, invoiceUrl, description, ruleMatched, diffDays
+      });
+    }
+  }
+  return activePayments;
+}
+
+function buildPaymentReminderText(p, studentName) {
+  const dueDateDisplay = p.dueDateStr.split("-").reverse().join("/");
+  const manualMsg = "\n\nPara regularizar seu pagamento, por favor, entre em contato via WhatsApp com a nossa secretaria acadêmica ou utilize a Chave PIX da escola.";
+  const linkLine = p.invoiceUrl ? `\n\n*Clique no link abaixo para pagar:*\n🔗 ${p.invoiceUrl}` : manualMsg;
+
+  if (p.ruleMatched === "BEFORE") {
+    return `Olá! Peço licença para enviar um lembrete preventivo: a cobrança de *${p.description}* do(a) aluno(a) *${studentName}* vence em breve (dia ${dueDateDisplay}).${linkLine}\n\nObrigado por fortalecer nosso esporte!`;
+  }
+  if (p.ruleMatched === "ONDAY") {
+    return `Informamos que hoje é o vencimento da cobrança (*${p.description}*) do(a) aluno(a) *${studentName}*.\n\nCaso já tenha efetuado o pagamento, desconsidere este aviso.${linkLine}`;
+  }
+  const diasAtraso = Math.abs(p.diffDays);
+  return `Olá! Consta em nosso sistema que a cobrança (*${p.description}*) do(a) aluno(a) *${studentName}* está vencida há ${diasAtraso} dias (vencimento em ${dueDateDisplay}).${linkLine}`;
+}
+
+async function fetchApprovedStudentsMap(env) {
+  const docs = await fetchAllDocs(env, "uba_2026_registrations");
+  const map = {};
+  for (const d of docs) {
+    const id = d.name.split("/").pop();
+    map[id] = d.fields || {};
+  }
+  return map;
+}
+
+function studentInfoFromFields(fields) {
+  const phoneRaw = fields.responsavel?.mapValue?.fields?.telefonePrincipal?.stringValue || "";
+  const alunoFields = fields.alunos?.arrayValue?.values?.[0]?.mapValue?.fields || {};
+  const fullName = (alunoFields.nome?.stringValue || "Aluno").trim();
+  const fotoUrl = alunoFields.fotoUrl?.stringValue || "";
+  const nome = fullName.split(" ")[0];
+  const contractStatus = fsFieldValue(fields.contractStatus) || "pendente";
+  return { phoneRaw, nome, fullName, fotoUrl, contractStatus };
+}
+
+/**
+ * Roda o lote de lembretes de pagamento (produção, todas as faturas que baterem com as
+ * regras habilitadas) ou um único teste isolado (uma regra, um aluno real aleatório).
+ * Sempre passa pelo resolveParentPhone - o toggle de segurança nunca é contornado aqui.
+ */
+async function runPaymentReminderBatch(env, { virtualTodayStr, config, isTest = false, onlyRule = null }) {
+  const activePayments = await findMatchingPaymentReminders(env, virtualTodayStr, config);
+  const filtered = onlyRule ? activePayments.filter(p => p.ruleMatched === onlyRule) : activePayments;
+  if (filtered.length === 0) return { count: 0, sample: null };
+
+  const studentsMap = await fetchApprovedStudentsMap(env);
+
+  // Só usa alunos com contrato aprovado (não cancelado, não pendente) e telefone cadastrado.
+  const eligible = [];
+  for (const p of filtered) {
+    const fields = studentsMap[p.studentId];
+    if (!fields) continue;
+    const info = studentInfoFromFields(fields);
+    if (info.contractStatus !== "aprovado" || !info.phoneRaw) continue;
+    eligible.push({ p, info });
+  }
+  if (eligible.length === 0) return { count: 0, sample: null };
+
+  let toProcess = eligible;
+  let sample = null;
+
+  if (isTest) {
+    // Teste isolado: escolhe UM aluno real aprovado aleatório entre os elegíveis.
+    const pick = eligible[Math.floor(Math.random() * eligible.length)];
+    toProcess = [pick];
+  }
+
+  let countSent = 0;
+  let stoppedByEndTime = false;
+  for (let i = 0; i < toProcess.length; i++) {
+    // Fora do horário comercial configurado, o lote de PRODUÇÃO para (não manda mais nada
+    // hoje). O teste manual isolado ignora esse limite - é uma ação explícita do admin.
+    if (!isTest && config.paymentReminderSendEndTime) {
+      const currentTimeStr = spDateParts(spNow()).timeStr;
+      if (currentTimeStr > config.paymentReminderSendEndTime) {
+        stoppedByEndTime = true;
+        break;
+      }
+    }
+
+    const { p, info } = toProcess[i];
+    const kvKey = isTest
+      ? `payment_reminder_test_sent:${p.paymentId}:${p.ruleMatched}`
+      : `payment_reminder_sent:${p.paymentId}:${p.ruleMatched}`;
+    const alreadySent = await env.UBA_STORAGE.get(kvKey);
+    if (alreadySent && !isTest) continue;
+
+    const text = buildPaymentReminderText(p, info.nome);
+    const { phone, redirected } = resolveParentPhone(config, info.phoneRaw);
+    const result = await sendParentMessage(env, phone, text);
+
+    if (result.success) {
+      await env.UBA_STORAGE.put(kvKey, "true", { expirationTtl: 86400 * 30 });
+      countSent++;
+    }
+    if (isTest) sample = { text, studentName: info.nome, rule: p.ruleMatched, redirected, sent: result.success, sendError: result.error };
+
+    await logPaymentReminderSend(env, {
+      studentId: p.studentId, studentName: info.fullName, studentPhoto: info.fotoUrl,
+      rule: p.ruleMatched, phone, redirected, success: result.success, isTest,
+    });
+
+    if (!isTest && config.paymentReminderIntervalSeconds > 0 && i < toProcess.length - 1) {
+      await sleep(config.paymentReminderIntervalSeconds * 1000);
+    }
+  }
+  if (stoppedByEndTime) {
+    console.log(`[Lembretes] Horário limite (${config.paymentReminderSendEndTime}) atingido - ${countSent}/${toProcess.length} enviados, restante fica pro próximo dia.`);
+  }
+  return { count: countSent, sample };
+}
+
+/** Registra cada lembrete de pagamento realmente disparado (nome + foto do aluno) pra
+ * alimentar a aba de Histórico da página de Avisos ao Administrador. */
+async function logPaymentReminderSend(env, { studentId, studentName, studentPhoto, rule, phone, redirected, success, isTest }) {
+  try {
+    const fields = {
+      studentId: { stringValue: studentId || "" },
+      studentName: { stringValue: studentName || "" },
+      rule: { stringValue: rule || "" },
+      phone: { stringValue: phone || "" },
+      redirected: { booleanValue: !!redirected },
+      success: { booleanValue: !!success },
+      isTest: { booleanValue: !!isTest },
+      sentAt: { timestampValue: new Date().toISOString() },
+    };
+    if (studentPhoto) fields.studentPhoto = { stringValue: studentPhoto };
+
+    await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/payment_reminder_logs?key=${env.FIREBASE_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields })
+    });
+  } catch (e) {
+    console.error("Erro ao registrar log de lembrete de pagamento:", e);
+  }
+}
+
+/**
+ * Disparo automático diário dos lembretes de pagamento, respeitando o horário configurado.
+ * Roda sempre para o dia de HOJE (não "ontem" como o resumo), pois BEFORE/ONDAY/AFTER
+ * dependem da data de vencimento comparada a hoje.
+ */
+async function handlePaymentReminderFlow(env) {
+  try {
+    const config = await fetchAdminNotificationsConfig(env);
+    const anyEnabled = config.paymentReminderBeforeEnabled || config.paymentReminderOnDayEnabled || config.paymentReminderAfterEnabled;
+    if (!anyEnabled) return;
+
+    const nowParts = spDateParts(spNow());
+    const sendTime = config.paymentReminderSendTime || "09:00";
+    const endTime = config.paymentReminderSendEndTime || "18:00";
+    const lastRun = await env.UBA_STORAGE.get(`payment_reminder_run:${nowParts.dateStr}`);
+
+    if (nowParts.timeStr >= sendTime && nowParts.timeStr <= endTime && !lastRun) {
+      await env.UBA_STORAGE.put(`payment_reminder_run:${nowParts.dateStr}`, "done", { expirationTtl: 86400 * 7 });
+      await runPaymentReminderBatch(env, { virtualTodayStr: nowParts.dateStr, config, isTest: false });
+    }
+  } catch (e) {
+    console.error("Erro no fluxo de lembretes de pagamento:", e);
+  }
+}
+
+async function fetchAllDocs(env, collectionId, pageSize = 500) {
+  const docs = [];
+  let pageToken;
+  do {
+    const pageUrl = `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/${collectionId}?key=${env.FIREBASE_API_KEY}&pageSize=${pageSize}`
+      + (pageToken ? `&pageToken=${pageToken}` : "");
+    const res = await fetch(pageUrl);
+    if (!res.ok) break;
+    const data = await res.json();
+    if (data.documents) docs.push(...data.documents);
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return docs;
+}
+
+async function fetchDailyEventsForDate(env, type, dateStr) {
+  const q = {
+    structuredQuery: {
+      from: [{ collectionId: "uba_2026_daily_events" }],
+      where: {
+        compositeFilter: {
+          op: "AND",
+          filters: [
+            { fieldFilter: { field: { fieldPath: "dateStr" }, op: "EQUAL", value: { stringValue: dateStr } } },
+            { fieldFilter: { field: { fieldPath: "type" }, op: "EQUAL", value: { stringValue: type } } }
+          ]
+        }
+      },
+      limit: 1000
+    }
+  };
+  const res = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery?key=${env.FIREBASE_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(q)
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.filter(item => item.document).map(item => {
+    const fields = item.document.fields || {};
+    return {
+      nome: fsFieldValue(fields.nome) || "",
+      horario: fsFieldValue(fields.horario) || "",
+      valor: fsFieldValue(fields.valor) ?? null,
+    };
+  });
+}
+
+const DAILY_SUMMARY_PAID_STATUSES = ["RECEIVED", "CONFIRMED", "RECEIVED_IN_CASH", "pago", "confirmado"];
+
+/** Mesma agregação do AdminStats/adminNotifications.ts (cliente), só que rodando no Worker
+ * pro cron poder disparar sem depender de um navegador aberto. Usa o mês do dia alvo
+ * (não "hoje"), pra virada de mês não misturar o mês errado num resumo de "ontem". */
+async function fetchMonthlyFinancialsServer(env, targetDateStr) {
+  const target = parseLocalDateStrServer(targetDateStr) || new Date();
+  const year = target.getFullYear();
+  const month = target.getMonth();
+  const isThisMonth = (d) => !!d && d.getFullYear() === year && d.getMonth() === month;
+
+  const docs = await fetchAllDocs(env, "financial_payments");
+  let receivedThisMonth = 0;
+  let pendingThisMonth = 0;
+
+  for (const doc of docs) {
+    const fields = doc.fields || {};
+    const status = fsFieldValue(fields.status);
+    if (["DELETED", "REFUNDED", "REMOVED_BY_RECEIVER"].includes(status)) continue;
+
+    const externalReference = fsFieldValue(fields.externalReference) || "";
+    const description = (fsFieldValue(fields.description) || "").toLowerCase();
+    const isManual = externalReference.startsWith("MANUAL_") || description.includes("uniforme") || description.includes("kit");
+    const value = fsFieldValue(fields.value) || 0;
+
+    if (DAILY_SUMMARY_PAID_STATUSES.includes(status)) {
+      const paidDateStr = fsFieldValue(fields.paymentDate) || fsFieldValue(fields.dateCreated) || fsFieldValue(fields.lastUpdate);
+      const paidDate = parseLocalDateStrServer(paidDateStr);
+      if (isThisMonth(paidDate)) receivedThisMonth += value;
+    } else if (!isManual) {
+      const due = parseLocalDateStrServer(fsFieldValue(fields.dueDate));
+      if (isThisMonth(due)) pendingThisMonth += value;
+    }
+  }
+
+  return { receivedThisMonth, pendingThisMonth };
+}
+
+async function fetchCaixaAtualServer(env) {
+  try {
+    const balance = await asaasJson(env, "/finance/balance");
+    if (typeof balance.balance === "number") return balance.balance;
+    if (typeof balance.value === "number") return balance.value;
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getDailySummaryImageDataUri() {
+  return `data:image/jpeg;base64,${RESUMO_ADMIN_JPEG_BASE64}`;
+}
+
+/** Monta o texto do resumo diário pra uma data arbitrária (YYYY-MM-DD). */
+async function buildDailySummaryText(env, dateStr) {
+  const [caixa, monthly, registrations, payments] = await Promise.all([
+    fetchCaixaAtualServer(env),
+    fetchMonthlyFinancialsServer(env, dateStr),
+    fetchDailyEventsForDate(env, "registration", dateStr),
+    fetchDailyEventsForDate(env, "payment", dateStr),
+  ]);
+
+  const payersSorted = [...payments].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR", { sensitivity: "base" }));
+  const dateDisplay = ymdToDisplay(dateStr);
+
+  const lines = [];
+  lines.push(`📊 *RESUMO DIÁRIO - ${dateDisplay}*`);
+  lines.push("");
+  lines.push(`CAIXA ATUAL: *${caixa !== null ? formatBRLServer(caixa) : "INDISPONÍVEL"}*`);
+  lines.push(`A RECEBER ESTE MÊS: *${formatBRLServer(monthly.pendingThisMonth)}*`);
+  lines.push(`JÁ RECEBIDO ESTE MÊS: *${formatBRLServer(monthly.receivedThisMonth)}*`);
+  lines.push("");
+  lines.push(`NOVOS CADASTROS: *${registrations.length}*`);
+  lines.push(`PAGAMENTOS RECEBIDOS: *${payersSorted.length}*`);
+
+  if (payersSorted.length > 0) {
+    lines.push("");
+    lines.push("*QUEM PAGOU:*");
+    payersSorted.forEach((p, i) => {
+      lines.push(`${i + 1}. ${p.horario} - ${(p.nome || "").toUpperCase()}`);
+    });
+  }
+
+  return lines.join("\n");
+}
+
+async function sendHubMessageServer(env, to, text, imageUrl) {
+  if (!env.WHATSAPP_HUB || !env.WHATSAPP_HUB_API_KEY) {
+    return { success: false, error: "WhatsApp Hub não configurado." };
+  }
+  try {
+    const hubRes = await env.WHATSAPP_HUB.fetch("https://whatsapp-hub.internal/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.WHATSAPP_HUB_API_KEY}` },
+      body: JSON.stringify({ to, text, imageUrl })
+    });
+    const body = await hubRes.json().catch(() => ({}));
+    return { success: hubRes.ok, body };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/** Monta e envia o resumo diário (usado tanto pelo cron quanto pelo botão de teste manual). */
+async function sendDailySummary(env, { dateStr, phone } = {}) {
+  const config = await fetchAdminNotificationsConfig(env);
+  const targetPhone = normalizeAdminPhoneServer(phone || config.adminPhone);
+  if (!targetPhone) return { success: false, error: "Telefone do administrador não configurado." };
+
+  const text = await buildDailySummaryText(env, dateStr);
+  const imageUrl = getDailySummaryImageDataUri();
+  const result = await sendHubMessageServer(env, targetPhone, text, imageUrl);
+  return { success: result.success, text, error: result.error || result.body?.error };
+}
 
 /**
  * Gerencia o fluxo da automação financeira (Diário + Agendamento de Teste)
@@ -708,9 +1634,20 @@ async function createCarnetPayments(env, payload, customer) {
   const modality = payload.modalidade ? ` (${payload.modalidade})` : "";
   const paymentDay = Number(payload.paymentDay || 10);
   const today = new Date();
+  const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+  // Se o dia de vencimento configurado já passou neste mês, a primeira cobrança
+  // (matrícula + 1ª mensalidade) precisa cair no mês seguinte, senão a Asaas rejeita
+  // com "Não é permitido data de vencimento inferior a hoje."
+  let anchorYear = today.getFullYear();
+  let anchorMonth = today.getMonth();
+  const firstAttempt = new Date(anchorYear, anchorMonth, Math.min(paymentDay, 28));
+  if (firstAttempt < todayDateOnly) {
+    anchorMonth += 1;
+  }
 
   if (payload.matriculaValue && Number(payload.matriculaValue) > 0) {
-    const dueDate = new Date(today.getFullYear(), today.getMonth(), Math.min(paymentDay, 28));
+    const dueDate = new Date(anchorYear, anchorMonth, Math.min(paymentDay, 28));
     const payment = await asaasJson(env, "/payments", {
       method: "POST",
       body: JSON.stringify({
@@ -728,7 +1665,7 @@ async function createCarnetPayments(env, payload, customer) {
   const mensalidadeValue = Number(payload.mensalidadeValue || 0);
   if (mensalidadeValue > 0) {
     for (let monthOffset = 0; monthOffset < 12; monthOffset++) {
-      const dueDate = new Date(today.getFullYear(), today.getMonth() + monthOffset, Math.min(paymentDay, 28));
+      const dueDate = new Date(anchorYear, anchorMonth + monthOffset, Math.min(paymentDay, 28));
       const monthLabel = dueDate.toLocaleDateString("pt-BR", { month: "short" }).replace(".", "").toUpperCase();
       const payment = await asaasJson(env, "/payments", {
         method: "POST",
@@ -746,271 +1683,6 @@ async function createCarnetPayments(env, payload, customer) {
   }
 
   return payments;
-}
-
-async function handleFinancialAutomationFlow(env) {
-  try {
-    const configRes = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/system_settings/whatsapp?key=${env.FIREBASE_API_KEY}`);
-    if (!configRes.ok) return;
-    const configDoc = await configRes.json();
-    const f = configDoc.fields || {};
-
-    const now = new Date();
-    const spTime = new Date(now.getTime() - 3 * 3600 * 1000); // UTC-3
-    const todayStr = spTime.toISOString().split('T')[0];
-    const currentTimeStr = spTime.toISOString().split('T')[1].substring(0, 5);
-
-    // 1. Processamento Diário (respeitando finAutoSendTime)
-    const sendTime = f.finAutoSendTime?.stringValue || "09:00";
-    const lastDailyRun = await env.UBA_STORAGE.get(`fin_daily_run:${todayStr}`);
-    
-    if (currentTimeStr >= sendTime && !lastDailyRun) {
-      await processFinancialAutomation(env, todayStr, false, f);
-      await env.UBA_STORAGE.put(`fin_daily_run:${todayStr}`, "done");
-    }
-
-    // 2. Processamento de Teste Agendado
-    const testDate = f.finAutoTestDate?.stringValue || "";
-    const testTime = f.finAutoTestTime?.stringValue || "";
-    const lastTestSentAt = f.finAutoTestSentAt?.stringValue || ""; // "YYYY-MM-DDTHH:MM..."
-    
-    if (testDate && testTime) {
-      // Usamos uma chave composta para o agendamento
-      const scheduleId = `${testDate}_${testTime}`;
-      
-      // Se já passou do horário do teste (naquele dia simulado ou hoje) 
-      // e ainda não marcamos como enviado PARA ESSE ID ESPECÍFICO
-      if (currentTimeStr >= testTime && lastTestSentAt !== scheduleId) {
-        console.log(`Executando teste agendado de automação para data simulada: ${testDate}`);
-        const count = await processFinancialAutomation(env, testDate, true, f);
-        
-        const resultMsg = count > 0 
-          ? `Sucesso: ${count} mensagens enviadas para a data ${testDate}.` 
-          : `Processado: Nenhuma fatura pendente encontrada para as regras na data ${testDate}.`;
-
-        // Atualiza Firestore para avisar a UI que enviou e marcar como concluído
-        await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/system_settings/whatsapp?key=${env.FIREBASE_API_KEY}&updateMask.fieldPaths=finAutoTestSentAt&updateMask.fieldPaths=finAutoTestResult`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fields: { 
-              finAutoTestSentAt: { stringValue: scheduleId },
-              finAutoTestResult: { stringValue: resultMsg }
-            }
-          })
-        });
-      }
-    }
-  } catch (e) {
-    console.error("Erro no fluxo financeiro:", e);
-  }
-}
-
-/**
- * Automação de Cobranças Financeiras (Lógica Core)
- */
-async function processFinancialAutomation(env, virtualTodayStr, isTestForce = false, configFields = null) {
-  // Helper para normalizar datas (suporta YYYY-MM-DD e DD/MM/YYYY)
-  const parseDate = (dStr) => {
-    if (!dStr) return null;
-    if (dStr.includes('/')) {
-      const [d, m, y] = dStr.split('/');
-      return new Date(`${y}-${m}-${d}T12:00:00`);
-    }
-    return new Date(dStr + 'T12:00:00');
-  };
-
-  try {
-    // 1. Carrega Configurações (se não passadas)
-    let f = configFields;
-    if (!f) {
-      const configRes = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/system_settings/whatsapp?key=${env.FIREBASE_API_KEY}`);
-      if (!configRes.ok) return 0;
-      const configDoc = await configRes.json();
-      f = configDoc.fields || {};
-    }
-
-    const beforeEnabled = f.finAutoBeforeEnabled?.booleanValue || false;
-    const beforeDays = parseInt(f.finAutoBeforeDays?.integerValue || "3");
-    const onDayEnabled = f.finAutoOnDayEnabled?.booleanValue || false;
-    const afterEnabled = f.finAutoAfterEnabled?.booleanValue || false;
-    const afterDays = parseInt(f.finAutoAfterDays?.integerValue || "5");
-    const testMode = isTestForce || (f.finAutoTestMode?.booleanValue || false);
-    const testPhone = f.testPhone?.stringValue || "5533998200546";
-    const pendingImageUrl = f.pendingImageUrl?.stringValue || "";
-
-    if (!beforeEnabled && !onDayEnabled && !afterEnabled) return 0;
-    console.log(`[Financeiro] Iniciando Processamento. VirtualToday: ${virtualTodayStr}, TestForce: ${isTestForce}`);
-
-    // 2. Busca todos os pagamentos PENDENTES E ATRASADOS usando runQuery
-    const paymentsQuery = {
-      structuredQuery: {
-        from: [{ collectionId: 'financial_payments' }],
-        where: {
-          fieldFilter: {
-            field: { fieldPath: 'status' },
-            op: 'IN',
-            value: {
-              arrayValue: {
-                values: [ { stringValue: 'PENDING' }, { stringValue: 'OVERDUE' } ]
-              }
-            }
-          }
-        },
-        limit: 1000
-      }
-    };
-
-    const payRes = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery?key=${env.FIREBASE_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(paymentsQuery)
-    });
-
-    if (!payRes.ok) {
-       console.error("[Financeiro] Erro ao buscar pagamentos:", await payRes.text());
-       return 0;
-    }
-    const payData = await payRes.json();
-    
-    // Filtra pagamentos que batem com as datas
-    const activePayments = [];
-    for (const item of payData) {
-      if (!item.document) continue;
-      const doc = item.document;
-      const fields = doc.fields || {};
-      const dueDateStr = fields.dueDate?.stringValue || "";
-      const studentId = fields.studentId?.stringValue || "";
-      const invoiceUrl = fields.invoiceUrl?.stringValue || "";
-      const description = fields.description?.stringValue || "Mensalidade";
-      
-      if (!dueDateStr || !studentId) continue;
-
-      const due = parseDate(dueDateStr);
-      const today = parseDate(virtualTodayStr);
-      if (!due || isNaN(due.getTime()) || !today || isNaN(today.getTime())) continue;
-
-      const diffTime = due.getTime() - today.getTime();
-      const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
-
-      let ruleMatched = null;
-      if (diffDays <= beforeDays && diffDays > 0 && beforeEnabled) ruleMatched = "BEFORE";
-      else if (diffDays === 0 && onDayEnabled) ruleMatched = "ONDAY";
-      else if (diffDays <= -afterDays && diffDays < 0 && afterEnabled) ruleMatched = "AFTER";
-
-      if (ruleMatched) {
-         activePayments.push({
-           paymentId: doc.name.split('/').pop(),
-           studentId,
-           dueDateStr,
-           invoiceUrl,
-           description,
-           ruleMatched,
-           diffDays // info extra (opcional)
-         });
-      }
-    }
-
-    if (activePayments.length === 0) {
-      console.log(`[Financeiro] Nenhuma fatura bateu com as regras de ${virtualTodayStr}.`);
-      return 0;
-    }
-
-    console.log(`[Financeiro] ${activePayments.length} faturas prontas para disparo.`);
-    
-    let toProcess = activePayments;
-    if (isTestForce && activePayments.length > 5) {
-      console.log(`[Financeiro] Modo teste ativo: limitando disparo para 5 (de ${activePayments.length} faturas) para evitar SPAM no número teste.`);
-      toProcess = activePayments.slice(0, 5);
-    }
-
-    // 3. Busca Informações das Matrículas para pegar telefone e nome
-    const res = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/uba_2026_registrations?key=${env.FIREBASE_API_KEY}&pageSize=500`);
-    if (!res.ok) return 0;
-    const data = await res.json();
-    const docs = data.documents || [];
-    
-    const studentsMap = {};
-    for (const d of docs) {
-      const id = d.name.split('/').pop();
-      studentsMap[id] = d.fields || {};
-    }
-
-    let countSent = 0;
-
-    for (const p of toProcess) {
-      const studentFields = studentsMap[p.studentId];
-      if (!studentFields) continue; // Aluno não encontrado (pode estar na paginação seguinte se houver +500)
-
-      const phoneRaw = studentFields.responsavel?.mapValue?.fields?.telefonePrincipal?.stringValue || "";
-      let studentName = studentFields.alunos?.arrayValue?.values?.[0]?.mapValue?.fields?.nome?.stringValue || "Aluno";
-      const contractStatus = studentFields.contractStatus?.stringValue || "pendente";
-      
-      // Limpeza basica de nome (opcional)
-      studentName = studentName.trim().split(' ')[0];
-
-      // Ignora alunos de fato cancelados/removidos, mas mantem "aprovado" ou "pendente" (pagamentos antigos)
-      if (contractStatus === 'cancelado') continue;
-      if (!phoneRaw) continue;
-
-      // Controle de duplicidade (KV) -> A key em produção NÃO leva a data virtual, para que evite o duplo envio de "AFTER"
-      const kvKey = isTestForce 
-        ? `fin_test_sent:${p.paymentId}:${p.ruleMatched}:${virtualTodayStr}`
-        : `fin_sent:${p.paymentId}:${p.ruleMatched}`;
-        
-      const alreadySent = await env.UBA_STORAGE.get(kvKey);
-      if (alreadySent && !isTestForce) continue; 
-
-      // Destinatário
-      let phone = phoneRaw.replace(/\D/g, '');
-      if (!phone.startsWith('55')) phone = '55' + phone;
-      if (testMode) phone = testPhone;
-
-      // Texto da Mensagem
-      let message = "";
-      const manualMsg = "\n\nPara regularizar seu pagamento, por favor, entre em contato via WhatsApp com a nossa secretaria acadêmica ou utilize a Chave PIX da escola.";
-      const paymentInfo = p.invoiceUrl ? "" : manualMsg;
-
-      if (p.ruleMatched === "BEFORE") {
-        message = `Olá! Peço licença para enviar um lembrete preventivo: a cobrança de *${p.description}* do(a) aluno(a) *${studentName}* vence em breve (dia ${p.dueDateStr.split('-').reverse().join('/')}).${paymentInfo}\n\nObrigado por fortalecer nosso esporte!`;
-      } else if (p.ruleMatched === "ONDAY") {
-        message = `Informamos que hoje é o vencimento da cobrança (*${p.description}*) do(a) aluno(a) *${studentName}*.\n\nCaso já tenha efetuado o pagamento, desconsidere este aviso.${paymentInfo}`;
-      } else if (p.ruleMatched === "AFTER") {
-        const diasAtraso = Math.abs(p.diffDays);
-        message = `Olá! Consta em nosso sistema que a cobrança (*${p.description}*) do(a) aluno(a) *${studentName}* está vencida há ${diasAtraso} dias (vencimento em ${p.dueDateStr.split('-').reverse().join('/')}).${paymentInfo}\n\nSe o pagamento já foi feito, favor nos enviar o comprovante.`;
-      }
-
-      const msgPayload = {
-        phone: phone,
-        text: message,
-        imageUrl: pendingImageUrl, // Opcional, mantido das regras
-        alunoNome: studentName
-      };
-
-      if (p.invoiceUrl) {
-        msgPayload.buttons = [
-          {
-            type: 'url',
-            displayText: 'Pagar Agora 💳',
-            url: p.invoiceUrl
-          }
-        ];
-      }
-
-      try {
-        await queueMessage(msgPayload, env);
-        await env.UBA_STORAGE.put(kvKey, "true", { expirationTtl: 86400 * 30 }); // Protege por 30 dias na chave
-        countSent++;
-      } catch (e) {
-        console.error(`Erro ao enfileirar fin auto para ${studentName}:`, e);
-      }
-    }
-    console.log(`[Financeiro] Finalizado. Total de cobranças enviadas para o teste/fluxo atual: ${countSent} / ${activePayments.length} detectadas.`);
-    return countSent;
-  } catch (err) {
-    console.error("Erro na automação financeira:", err);
-    return 0;
-  }
 }
 
 /**
@@ -1077,15 +1749,26 @@ async function processBirthdays(env, force = false) {
       console.log(`Iniciando automação de aniversários para ${todayStr}... (Modo Teste: ${testMode}, Force: ${force})`);
       if (!force) await env.UBA_STORAGE.put("last_birthday_run", todayStr); // Marca como rodado apenas no fluxo auto
 
-      // 5. Busca todos os alunos (limitando a 300 registros para segurança)
-      const registrationsRes = await fetch(`https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/uba_2026_registrations?key=${env.FIREBASE_API_KEY}&pageSize=300`);
-      if (!registrationsRes.ok) return;
-      const registrations = await registrationsRes.json();
-      
+      // 5. Busca todos os alunos.
+      // A API REST do Firestore ignora pageSize e limita a resposta (ex: 300 docs por página)
+      // mesmo pedindo mais - é obrigatório paginar com nextPageToken, senão alunos fora da
+      // primeira página ficam invisíveis (nunca recebem o aviso de aniversário).
+      const regDocs = [];
+      let bdayPageToken = undefined;
+      do {
+        const pageUrl = `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/uba_2026_registrations?key=${env.FIREBASE_API_KEY}&pageSize=300`
+          + (bdayPageToken ? `&pageToken=${bdayPageToken}` : '');
+        const registrationsRes = await fetch(pageUrl);
+        if (!registrationsRes.ok) break;
+        const registrations = await registrationsRes.json();
+        if (registrations.documents) regDocs.push(...registrations.documents);
+        bdayPageToken = registrations.nextPageToken;
+      } while (bdayPageToken);
+
       const bdayStudents = [];
       const [todayDay, todayMonth] = [spTime.getDate(), spTime.getMonth() + 1];
 
-      (registrations.documents || []).forEach(doc => {
+      regDocs.forEach(doc => {
         const docFields = doc.fields || {};
         const alunos = docFields.alunos?.arrayValue?.values || [];
         const phone = docFields.responsavel?.mapValue?.fields?.telefonePrincipal?.stringValue || "";

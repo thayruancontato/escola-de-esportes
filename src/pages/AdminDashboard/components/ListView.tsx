@@ -14,10 +14,28 @@ interface ListViewProps {
     onResendApproval: (item: Student) => void;
     activeModality: string | null;
     filterStatus?: string;
+    selectionEnabled?: boolean;
+    selectedIds?: string[];
+    onToggleSelection?: (regId: string) => void;
+    onToggleSelectAll?: () => void;
+    allVisibleSelected?: boolean;
 }
 
 export const ListView: React.FC<ListViewProps> = ({
-    students, isMobile, loading, turmas, plans, onNavigate, onResendApproval, activeModality, filterStatus
+    students,
+    isMobile,
+    loading,
+    turmas,
+    plans,
+    onNavigate,
+    onResendApproval,
+    activeModality,
+    filterStatus,
+    selectionEnabled = false,
+    selectedIds = [],
+    onToggleSelection,
+    onToggleSelectAll,
+    allVisibleSelected = false
 }) => {
     const [visibleCount, setVisibleCount] = useState(20);
 
@@ -36,12 +54,67 @@ export const ListView: React.FC<ListViewProps> = ({
 
     return (
         <div onScroll={handleScroll} style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '10px' : '0 25px 20px 25px', WebkitOverflowScrolling: 'touch' }}>
+            {!isMobile && selectionEnabled && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '10px 12px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderBottom: 'none', color: '#007d2f', fontWeight: 800 }}>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                        <input
+                            type="checkbox"
+                            checked={allVisibleSelected}
+                            onChange={onToggleSelectAll}
+                            style={{ width: '16px', height: '16px', accentColor: '#007d2f' }}
+                        />
+                        Selecionar todos os cadastros filtrados
+                    </label>
+                    <span>{selectedIds.length} selecionado{selectedIds.length === 1 ? '' : 's'}</span>
+                </div>
+            )}
             {isMobile ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', paddingBottom: '140px' }}>
-                    {students.slice(0, visibleCount).map(item => <MobileCard key={item.uniqueId} item={item} turmas={turmas} onNavigate={onNavigate} onResendApproval={onResendApproval} filterStatus={filterStatus} />)}
+                    {selectionEnabled && (
+                        <button
+                            type="button"
+                            onClick={onToggleSelectAll}
+                            style={{
+                                width: '100%',
+                                padding: '10px',
+                                border: '1px solid #d1d5db',
+                                background: allVisibleSelected ? '#e9f8ef' : '#fff',
+                                color: '#007d2f',
+                                fontWeight: 800,
+                                borderRadius: '4px'
+                            }}
+                        >
+                            {allVisibleSelected ? 'Desmarcar todos' : 'Selecionar todos'}
+                        </button>
+                    )}
+                    {students.slice(0, visibleCount).map(item => (
+                        <MobileCard
+                            key={item.uniqueId}
+                            item={item}
+                            turmas={turmas}
+                            onNavigate={onNavigate}
+                            onResendApproval={onResendApproval}
+                            filterStatus={filterStatus}
+                            selectionEnabled={selectionEnabled}
+                            selected={selectedIds.includes(item.regId)}
+                            onToggleSelection={onToggleSelection}
+                        />
+                    ))}
                 </div>
             ) : (
-                <DesktopTable students={students.slice(0, visibleCount)} turmas={turmas} plans={plans} onNavigate={onNavigate} onResendApproval={onResendApproval} filterStatus={filterStatus} />
+                <DesktopTable
+                    students={students.slice(0, visibleCount)}
+                    turmas={turmas}
+                    plans={plans}
+                    onNavigate={onNavigate}
+                    onResendApproval={onResendApproval}
+                    filterStatus={filterStatus}
+                    selectionEnabled={selectionEnabled}
+                    selectedIds={selectedIds}
+                    onToggleSelection={onToggleSelection}
+                    onToggleSelectAll={onToggleSelectAll}
+                    allVisibleSelected={allVisibleSelected}
+                />
             )}
         </div>
     );

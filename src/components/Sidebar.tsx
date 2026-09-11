@@ -33,7 +33,7 @@ export default function Sidebar({
             top: 0,
             left: 0,
             height: '100vh',
-            zIndex: 100,
+            zIndex: 2000, // Sempre por cima de qualquer coisa (barras/modais fixos usam até 1000+)
             transition: 'all 0.3s ease',
             transform: isMobile && !isOpen ? 'translateX(-100%)' : 'translateX(0)',
             boxShadow: isMobile && isOpen ? '4px 0 15px rgba(0,0,0,0.1)' : 'none'
@@ -123,7 +123,7 @@ export function SidebarOverlay({ isOpen, onClose }: { isOpen: boolean, onClose: 
     return (
         <div
             onClick={onClose}
-            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 99, backdropFilter: 'blur(2px)' }}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1999, backdropFilter: 'blur(2px)' }}
         />
     );
 }

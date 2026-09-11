@@ -6,6 +6,10 @@ compatibility_date = "2024-03-20"
 binding = "UBA_STORAGE"
 id = "c906dd6b4730420f92b09688a2432708"
 
+[[services]]
+binding = "WHATSAPP_HUB"
+service = "whatsapp-hub"
+
 [vars]
 FIREBASE_PROJECT_ID = "cadastro-uba"
 FIREBASE_API_KEY = "AIzaSyDE3mvj0tj9VWUK5vDgmx3ZJ5ZSjW_RLZA"

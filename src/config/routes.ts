@@ -42,10 +42,7 @@ export const ALL_SYSTEM_ROUTES: RouteCategory[] = [
     {
         category: 'Comunicação',
         routes: [
-            { path: '/admin/mensagens', label: 'Disparos de Mensagens' },
-            { path: '/admin/mensagens/cobrancas', label: 'Mensagens de Cobrança' },
-            { path: '/admin/mensagens/historico', label: 'Histórico de Mensagens' },
-            { path: '/admin/mensagens/automacao', label: 'Automação de Mensagens' },
+            { path: '/admin/mensagens/avisos-admin', label: 'Avisos ao Administrador' },
             { path: '/admin/mensagens/configuracoes', label: 'Configurações de Mensagem' },
             { path: '/admin/whatsapp', label: 'WhatsApp' },
             { path: '/admin/links', label: 'Links Uteis' },

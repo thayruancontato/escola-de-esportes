@@ -360,12 +360,12 @@ export default function StudentDetailsSection({
                                                 </div>
                                             </div>
 
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '5px' }}>
-                                                <div style={{ background: 'rgba(255,255,255,1)', padding: '6px 12px', borderRadius: '8px', fontSize: '0.8rem', display: 'flex', gap: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
-                                                    <strong style={{ color: reg.associadoUba ? '#2e7d32' : '#c32228' }}>{reg.associadoUba ? 'Sócio UBA' : 'Não Sócio'}</strong>
-                                                    {reg.associadoUba && <span style={{ color: '#666' }}>Cota: {reg.numeroCota}</span>}
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginTop: '5px' }}>
+                                                <div style={{ background: 'rgba(255,255,255,1)', padding: '6px 12px', borderRadius: '8px', fontSize: '0.8rem', display: 'flex', gap: '8px', flexWrap: 'wrap', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+                                                    <strong style={{ color: reg.associadoUba ? '#2e7d32' : '#c32228', whiteSpace: 'nowrap' }}>{reg.associadoUba ? 'Sócio UBA' : 'Não Sócio'}</strong>
+                                                    {reg.associadoUba && <span style={{ color: '#666', whiteSpace: 'nowrap' }}>Cota: {reg.numeroCota}</span>}
                                                 </div>
-                                                <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.9)', fontWeight: 'bold' }}>
+                                                <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.9)', fontWeight: 'bold', whiteSpace: 'nowrap' }}>
                                                     STATUS: <span style={{
                                                         padding: '2px 8px',
                                                         borderRadius: '4px',

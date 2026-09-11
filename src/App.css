@@ -1,5 +1,5 @@
 /* App.css - Ported from Angular app.component.scss + styles.scss */
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@800&family=Open+Sans:wght@300;400;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;800;900&family=Anton&family=Open+Sans:wght@300;400;600;700;800&display=swap');
 
 /* Variables */
 :root {
@@ -641,6 +641,43 @@ input[type="checkbox"] {
 
 .btn-start:active {
   transform: translateY(-1px);
+}
+
+/* School system request form */
+.school-request-container {
+  padding-bottom: 90px;
+}
+
+.school-request-form {
+  padding-bottom: 78px;
+}
+
+.school-request-navigation {
+  position: fixed;
+  left: 50%;
+  right: auto;
+  bottom: 0;
+  width: min(1200px, 100%);
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: rgba(255, 255, 255, 0.96);
+  border-top: 1px solid var(--border-color);
+  box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.16);
+  padding: 12px max(12px, env(safe-area-inset-left)) calc(12px + env(safe-area-inset-bottom, 0)) max(12px, env(safe-area-inset-right));
+  margin-top: 0;
+}
+
+@media (max-width: 768px) {
+  .school-request-navigation {
+    gap: 10px;
+  }
+
+  .school-request-navigation .btn-nav {
+    flex: 1;
+    min-height: 48px;
+    padding: 10px 12px;
+    font-size: 14px;
+  }
 }
 
 @keyframes fadeIn {

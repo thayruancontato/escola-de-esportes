@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { auth, db } from '../firebase';
 import { AlertCircle, CheckCircle, ChevronRight, LogOut } from 'lucide-react';
-import { collection, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
 import ContractEditor from '../components/contracts/ContractEditor';
 import SignatureCanvas from '../components/SignatureCanvas';
 import { signOut } from 'firebase/auth';
+import { notifyAdminContractSigned } from '../utils/adminNotifications';
+
 
 export default function MandatoryContractPage() {
     const navigate = useNavigate();
@@ -105,6 +107,7 @@ export default function MandatoryContractPage() {
             const nextPendingIndex = updatedAlunos.findIndex((a: any) => !a.signatureData);
 
             if (nextPendingIndex !== -1) {
+                // Ainda há alunos sem assinar neste registro
                 setStudentData({ ...studentData, alunos: updatedAlunos });
                 setCurrentIndex(nextPendingIndex);
                 setCapturedSignature(null);
@@ -112,9 +115,28 @@ export default function MandatoryContractPage() {
                 window.scrollTo(0, 0);
                 alert("Assinatura salva! Temos mais um aluno pendente. Por favor, assine agora o contrato do próximo atleta.");
             } else {
-                // Check if there are OTHER registrations before leaving
-                // Actually, navigating to dashboard is safe as the layout will redirect back if needed,
-                // but a friendly message helps.
+                // Todos os alunos deste registro assinaram — notifica o admin em background
+                const signedAluno = updatedAlunos[currentIndex];
+                const signedAt = signedAluno.signedAt as string;
+
+                // Busca dados completos do registro para montar a notificação
+                getDoc(doc(db, 'uba_2026_registrations', registrationId))
+                    .then(snap => {
+                        if (!snap.exists()) return;
+                        const reg = snap.data() as any;
+                        const primeiroAluno = reg.alunos?.[0];
+                        notifyAdminContractSigned({
+                            registrationId,
+                            nome: primeiroAluno?.nome || updatedAlunos[0]?.nome || 'Aluno',
+                            modalidade: reg.modalidade,
+                            fotoUrl: primeiroAluno?.fotoUrl,
+                            responsavelNome: reg.responsavel?.nome,
+                            telefone: reg.responsavel?.telefonePrincipal,
+                            signedAt,
+                        }).catch(err => console.error('Falha ao notificar admin sobre contrato assinado:', err));
+                    })
+                    .catch(err => console.error('Falha ao buscar dados para notificação de contrato:', err));
+
                 alert("Todas as assinaturas desta matrícula foram concluídas!");
                 navigate('/aluno/dashboard');
             }
@@ -125,6 +147,7 @@ export default function MandatoryContractPage() {
             setSaving(false);
         }
     };
+
 
     if (loading) {
         return (

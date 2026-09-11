@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from '../firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
@@ -13,8 +13,14 @@ export default function AdminLogin() {
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
     const navigate = useNavigate();
+    const location = useLocation();
     const { showAlert } = useDialog();
     const { showLoading } = useLoading();
+
+    // Se o admin chegou aqui redirecionado de uma página protegida (ex: link de
+    // aprovação de cadastro no WhatsApp), volta pra ela depois do login em vez
+    // de sempre cair no dashboard.
+    const redirectTo = (location.state as { from?: string } | null)?.from || '/admin/dashboard';
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -28,7 +34,7 @@ export default function AdminLogin() {
             console.log("DEBUG: Login ADMIN sucesso. Disparando loading...");
             showLoading(3000, 'Acessando Painel Administrativo...');
             setTimeout(() => {
-                navigate('/admin/dashboard');
+                navigate(redirectTo);
             }, 3000);
         } catch (authError: any) {
             console.log("Firebase Auth failed, checking Employee DB...", authError);

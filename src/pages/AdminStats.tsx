@@ -80,6 +80,8 @@ export default function AdminStats() {
 
     const [expandedCard, setExpandedCard] = useState<string | null>(null);
     const [paymentData, setPaymentData] = useState<any[]>([]);
+    const [allRegistrations, setAllRegistrations] = useState<any[]>([]);
+    const [allPayments, setAllPayments] = useState<any[]>([]);
     const [allExpenses, setAllExpenses] = useState<any[]>([]);
 
     // View Modes
@@ -111,6 +113,8 @@ export default function AdminStats() {
 
                 const registrations = regSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
                 const payments = paySnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+                setAllRegistrations(registrations);
+                setAllPayments(payments);
 
                 // Identify associations for looking up names in payments
                 const regMap = new Map();
@@ -351,6 +355,10 @@ export default function AdminStats() {
         );
     };
 
+    const formatCurrency = (value: number) => {
+        return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    };
+
     // ==================== MONTHLY FILTERING ====================
     const monthlyPayments = useMemo(() => {
         return paymentData.filter(p => {
@@ -434,6 +442,99 @@ export default function AdminStats() {
         return result;
     }, [monthlyPayments]);
 
+    const monthlyStudentFinancialRows = useMemo(() => {
+        const paidStatuses = ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH', 'pago', 'confirmado'];
+        const monthStart = new Date(selectedMonth.year, selectedMonth.month, 1);
+        const monthEnd = new Date(selectedMonth.year, selectedMonth.month + 1, 0, 23, 59, 59, 999);
+
+        const parseLocalDate = (value: any): Date | null => {
+            if (!value) return null;
+            if (value instanceof Timestamp) return value.toDate();
+            if (value instanceof Date) return value;
+            if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                const [year, month, day] = value.split('-').map(Number);
+                return new Date(year, month - 1, day);
+            }
+            const parsed = new Date(value);
+            return Number.isNaN(parsed.getTime()) ? null : parsed;
+        };
+
+        const isInSelectedMonth = (date: Date | null) => {
+            if (!date) return false;
+            return date >= monthStart && date <= monthEnd;
+        };
+
+        return allRegistrations
+            .filter((reg: any) => reg.contractStatus?.toLowerCase() === 'aprovado')
+            .map((reg: any) => {
+                const student = reg.alunos?.[0] || {};
+                const relatedPayments = allPayments.filter((payment: any) => payment.studentId === reg.id);
+                const pendingInvoice = relatedPayments
+                    .filter((payment: any) => !paidStatuses.includes(payment.status) && isInSelectedMonth(parseLocalDate(payment.dueDate)))
+                    .sort((a: any, b: any) => {
+                        const dateA = parseLocalDate(a.dueDate)?.getTime() || 0;
+                        const dateB = parseLocalDate(b.dueDate)?.getTime() || 0;
+                        return dateA - dateB;
+                    })[0];
+                const paidInvoice = relatedPayments
+                    .filter((payment: any) => {
+                        const paidDate = parseLocalDate(payment.paymentDate || payment.clientPaymentDate || payment.confirmedDate || payment.dateCreated || payment.lastUpdate);
+                        return paidStatuses.includes(payment.status) && isInSelectedMonth(paidDate);
+                    })
+                    .sort((a: any, b: any) => {
+                        const dateA = parseLocalDate(a.paymentDate || a.clientPaymentDate || a.confirmedDate || a.dateCreated || a.lastUpdate)?.getTime() || 0;
+                        const dateB = parseLocalDate(b.paymentDate || b.clientPaymentDate || b.confirmedDate || b.dateCreated || b.lastUpdate)?.getTime() || 0;
+                        return dateB - dateA;
+                    })[0];
+                const paidDate = paidInvoice ? parseLocalDate(paidInvoice.paymentDate || paidInvoice.clientPaymentDate || paidInvoice.confirmedDate || paidInvoice.dateCreated || paidInvoice.lastUpdate) : null;
+
+                if (!pendingInvoice && !paidInvoice) return null;
+
+                const phone = reg.responsavel?.telefonePrincipal || reg.responsavel?.telefone || '';
+                const invoiceUrl = pendingInvoice?.invoiceUrl || pendingInvoice?.bankSlipUrl || reg.financialInvoiceUrl || '';
+                const pendingDescription = pendingInvoice?.description || pendingInvoice?.title || 'Fatura pendente';
+                const paidDescription = paidInvoice?.description || paidInvoice?.title || 'Última fatura paga';
+                const value = pendingInvoice?.value || paidInvoice?.value || reg.financialPendingAmount || 0;
+                const firstName = (reg.responsavel?.nome || 'Responsável').split(' ')[0];
+                const message = [
+                    `Olá, ${firstName}!`,
+                    '',
+                    `Identificamos uma pendência em aberto: ${pendingDescription}.`,
+                    value ? `Valor: ${formatCurrency(value)}` : '',
+                    invoiceUrl ? `Link da fatura: ${invoiceUrl}` : '',
+                    '',
+                    'Qualquer dúvida, estamos à disposição.'
+                ].filter(Boolean).join('\n');
+
+                return {
+                    id: reg.id,
+                    photoUrl: student.fotoUrl || student.photoUrl || '',
+                    name: student.nome || reg.responsavel?.nome || 'Sem nome',
+                    status: pendingInvoice ? 'PENDENTE' : 'REGULAR',
+                    paidDateLabel: !pendingInvoice && paidDate ? paidDate.toLocaleDateString('pt-BR') : '-',
+                    pendingDescription: pendingInvoice ? pendingDescription : paidDescription,
+                    valueLabel: value ? formatCurrency(value) : '-',
+                    invoiceUrl,
+                    chargeUrl: phone ? `https://wa.me/55${phone.replace(/\D/g, '')}?text=${encodeURIComponent(message)}` : ''
+                };
+            })
+            .filter(Boolean)
+            .sort((a: any, b: any) => {
+                if (a.status !== b.status) return a.status === 'PENDENTE' ? -1 : 1;
+                return a.name.localeCompare(b.name, 'pt-BR');
+            }) as Array<{
+                id: string;
+                photoUrl: string;
+                name: string;
+                status: 'PENDENTE' | 'REGULAR';
+                paidDateLabel: string;
+                pendingDescription: string;
+                valueLabel: string;
+                invoiceUrl: string;
+                chargeUrl: string;
+            }>;
+    }, [allRegistrations, allPayments, selectedMonth]);
+
     // Month navigation helpers
     const selectedMonthLabel = new Date(selectedMonth.year, selectedMonth.month).toLocaleString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase();
     const isCurrentMonth = selectedMonth.year === now.getFullYear() && selectedMonth.month === now.getMonth();
@@ -490,10 +591,6 @@ export default function AdminStats() {
             .map(([month, total]) => ({ month, value: total }))
             .sort((a, b) => a.month.localeCompare(b.month));
     }, [paymentData]);
-
-    const formatCurrency = (value: number) => {
-        return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-    };
 
     const StatCard = ({ title, value, subValue, icon: Icon, color, trend, trendType, gradient }: any) => (
         <div className="animate-scale-in" style={{
@@ -717,6 +814,42 @@ export default function AdminStats() {
         );
     };
 
+    const compressReportImage = async (url: string): Promise<string> => {
+        if (!url) return '';
+
+        try {
+            const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = url;
+            });
+
+            const size = 96;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return '';
+
+            const scale = Math.max(size / image.width, size / image.height);
+            const width = image.width * scale;
+            const height = image.height * scale;
+            const x = (size - width) / 2;
+            const y = (size - height) / 2;
+
+            ctx.fillStyle = '#f1f5f9';
+            ctx.fillRect(0, 0, size, size);
+            ctx.drawImage(image, x, y, width, height);
+
+            return canvas.toDataURL('image/jpeg', 0.62);
+        } catch (error) {
+            console.warn('Nao foi possivel comprimir imagem do relatorio:', error);
+            return '';
+        }
+    };
+
     if (loading) {
         return (
             <PageContainer>
@@ -812,61 +945,145 @@ export default function AdminStats() {
                     </button>
 
                     <button
-                        onClick={() => {
+                        onClick={async () => {
                             const printWindow = window.open('', '_blank');
                             if (!printWindow) return;
 
                             printWindow.document.write(`
+                                <html>
+                                    <head><title>Preparando relatório...</title></head>
+                                    <body style="font-family: sans-serif; padding: 32px; color: #1e293b;">
+                                        <strong>Preparando relatório...</strong>
+                                        <p>Comprimindo imagens para deixar o arquivo mais leve.</p>
+                                    </body>
+                                </html>
+                            `);
+                            printWindow.document.close();
+
+                            const reportRows = await Promise.all(monthlyStudentFinancialRows.map(async (item) => ({
+                                ...item,
+                                reportPhotoUrl: item.photoUrl ? await compressReportImage(item.photoUrl) : ''
+                            })));
+
+                            const monthlyRowsHtml = monthlyStudentFinancialRows.length === 0
+                                ? `<tr><td colspan="7" class="empty-row">Nenhum aluno com pagamento ou pend&ecirc;ncia neste per&iacute;odo.</td></tr>`
+                                : reportRows.map((item) => `
+                                    <tr>
+                                        <td>${item.reportPhotoUrl ? `<img class="student-photo" src="${item.reportPhotoUrl}" />` : `<div class="student-photo placeholder">FOTO</div>`}</td>
+                                        <td><strong>${item.name}</strong></td>
+                                        <td><span class="status ${item.status === 'PENDENTE' ? 'pending' : 'regular'}">${item.status}</span></td>
+                                        <td>${item.paidDateLabel}</td>
+                                        <td>${item.pendingDescription}</td>
+                                        <td><strong>${item.valueLabel}</strong></td>
+                                        <td>${item.status === 'PENDENTE' && item.chargeUrl ? `<a class="charge-button" href="${item.chargeUrl}" target="_blank">Cobrar</a>` : '-'}</td>
+                                    </tr>
+                                `).join('');
+
+                            printWindow.document.write(`
                                     <html>
                                     <head>
-                                        <title>Relatório Estatístico - ${selectedMonthLabel}</title>
+                                        <title>Relat&oacute;rio Estat&iacute;stico - ${selectedMonthLabel}</title>
                                         <style>
-                                            body { font-family: sans-serif; padding: 20px; color: #1e293b; }
+                                            body { font-family: sans-serif; padding: 20px; color: #1e293b; background: #f8fafc; }
                                             h1 { color: #c32228; text-align: center; }
-                                            .header { margin-bottom: 30px; border-bottom: 2px solid #f1f5f9; padding-bottom: 15px; }
-                                            .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
-                                            .card { border: 1px solid #e2e8f0; padding: 15px; border-radius: 12px; }
-                                            .card-title { font-size: 0.8rem; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 5px; }
-                                            .card-value { font-size: 1.5rem; font-weight: 900; color: #1e293b; }
+                                            .header { margin-bottom: 30px; border-bottom: 2px solid #f1f5f9; padding-bottom: 15px; text-align: center; }
+                                            .month-badge { font-weight: 900; font-size: 2rem; color: #c32228; border: 3px solid #c32228; border-radius: 12px; padding: 12px 24px; display: inline-block; margin: 10px auto; letter-spacing: 2px; }
+                                            .cards-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 28px; }
+                                            .stat-card { min-height: 120px; background: #fff; border-left: 5px solid var(--color); padding: 18px; box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08); position: relative; overflow: hidden; }
+                                            .stat-card.dark { background: #152033; color: #fff; border-left-color: #152033; }
+                                            .stat-card.green { background: #10b981; color: #fff; border-left-color: #10b981; }
+                                            .stat-card.purple { background: #7c3aed; color: #fff; border-left-color: #7c3aed; }
+                                            .card-title { font-size: 0.78rem; font-weight: 900; color: inherit; opacity: 0.78; text-transform: uppercase; margin-bottom: 28px; }
+                                            .card-value { font-size: 1.75rem; font-weight: 900; color: inherit; }
+                                            .card-sub { margin-top: 8px; font-size: 0.78rem; font-weight: 800; color: inherit; opacity: 0.86; }
                                             .section-title { font-size: 1.1rem; font-weight: 900; color: #1e293b; margin: 30px 0 15px; border-left: 4px solid #c32228; padding-left: 10px; }
-                                            table { width: 100%; border-collapse: collapse; }
-                                            th, td { border: 1px solid #f1f5f9; padding: 10px; text-align: left; }
-                                            th { background: #f8fafc; font-size: 0.8rem; }
+                                            table { width: 100%; border-collapse: collapse; background: #fff; }
+                                            th, td { border: 1px solid #e2e8f0; padding: 10px; text-align: left; vertical-align: middle; }
+                                            th { background: #f8fafc; font-size: 0.72rem; text-transform: uppercase; color: #64748b; }
+                                            .student-photo { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; border: 1px solid #e2e8f0; }
+                                            .student-photo.placeholder { display: flex; align-items: center; justify-content: center; background: #f1f5f9; color: #94a3b8; font-size: 0.58rem; font-weight: 900; }
+                                            .status { display: inline-block; padding: 5px 10px; border-radius: 999px; font-size: 0.68rem; font-weight: 900; }
+                                            .status.pending { background: #fef2f2; color: #dc2626; }
+                                            .status.regular { background: #ecfdf5; color: #059669; }
+                                            .charge-button { display: inline-block; background: #25D366; color: #fff; padding: 7px 12px; border-radius: 8px; text-decoration: none; font-size: 0.72rem; font-weight: 900; }
+                                            .empty-row { text-align: center; color: #94a3b8; font-weight: 800; padding: 24px; }
                                             .modality-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f5f9; }
                                             .footer { margin-top: 50px; text-align: center; color: #64748b; font-size: 0.8rem; }
+                                            @media print { body { background: #fff; } .charge-button { color: #fff !important; } }
                                         </style>
                                     </head>
                                     <body>
                                         <div class="header">
-                                            <h1 style="margin-bottom: 5px;">UBA 2026 - RESUMO ESTATÍSTICO</h1>
-                                            <div style="text-align: center; font-weight: 900; font-size: 2rem; color: #c32228; border: 3px solid #c32228; border-radius: 12px; padding: 12px 24px; display: inline-block; margin: 10px auto; letter-spacing: 2px;">${selectedMonthLabel}</div>
-                                            <p style="margin-top: 10px; color: #64748b;">Relatório gerado em: ${new Date().toLocaleString('pt-BR')}</p>
+                                            <h1 style="margin-bottom: 5px;">UBA 2026 - RESUMO ESTAT&Iacute;STICO</h1>
+                                            <div class="month-badge">${selectedMonthLabel}</div>
+                                            <p style="margin-top: 10px; color: #64748b;">Relat&oacute;rio gerado em: ${new Date().toLocaleString('pt-BR')}</p>
                                         </div>
 
-                                        <div class="grid">
-                                            <div class="card">
+                                        <div class="cards-grid">
+                                            <div class="stat-card" style="--color: #3b82f6;">
                                                 <div class="card-title">Alunos Ativos</div>
                                                 <div class="card-value">${stats.approvedRegistrations}</div>
+                                                <div class="card-sub">Total: ${stats.totalStudents}</div>
                                             </div>
-                                            <div class="card">
-                                                <div class="card-title">Receita Mensal (MRR)</div>
+                                            <div class="stat-card dark">
+                                                <div class="card-title">Receita Mensal Recorrente</div>
                                                 <div class="card-value">${formatCurrency(stats.projectedMRR)}</div>
+                                                <div class="card-sub">Previs&atilde;o baseada nos planos</div>
                                             </div>
-                                            <div class="card">
-                                                <div class="card-title">Receita do Mês</div>
-                                                <div class="card-value" style="color: #059669;">${formatCurrency(monthlyRevenue)}</div>
+                                            <div class="stat-card green">
+                                                <div class="card-title">Receita do M&ecirc;s</div>
+                                                <div class="card-value">${formatCurrency(monthlyRevenue)}</div>
+                                                <div class="card-sub">Total geral: ${formatCurrency(stats.totalRevenue)}</div>
                                             </div>
-                                            <div class="card">
-                                                <div class="card-title">Despesas do Mês</div>
-                                                <div class="card-value" style="color: #ef4444;">${formatCurrency(monthlyExpenseTotal)}</div>
+                                            <div class="stat-card" style="--color: #ef4444;">
+                                                <div class="card-title">Despesas do M&ecirc;s</div>
+                                                <div class="card-value">${formatCurrency(monthlyExpenseTotal)}</div>
+                                                <div class="card-sub">Total geral: ${formatCurrency(stats.totalExpenses)}</div>
                                             </div>
-                                            <div class="card" style="grid-column: 1 / -1;">
-                                                <div class="card-title">Lucro Líquido do Mês</div>
-                                                <div class="card-value" style="color: ${monthlyNetProfit >= 0 ? '#059669' : '#ef4444'};">${formatCurrency(monthlyNetProfit)}</div>
+                                            <div class="stat-card purple">
+                                                <div class="card-title">Lucro L&iacute;quido (Operacional)</div>
+                                                <div class="card-value">${formatCurrency(monthlyNetProfit)}</div>
+                                                <div class="card-sub">Receita - Despesas do m&ecirc;s</div>
+                                            </div>
+                                            <div class="stat-card" style="--color: #f59e0b;">
+                                                <div class="card-title">Taxas Asaas (Est.)</div>
+                                                <div class="card-value">${formatCurrency(monthlyAsaasFees.total)}</div>
+                                                <div class="card-sub">${monthlyAsaasFees.pix} Pix / ${monthlyAsaasFees.boleto} Boleto</div>
+                                            </div>
+                                            <div class="stat-card green">
+                                                <div class="card-title">Lucro L&iacute;quido Real</div>
+                                                <div class="card-value">${formatCurrency(finalNetProfit)}</div>
+                                                <div class="card-sub">Descontando taxas Asaas</div>
+                                            </div>
+                                            <div class="stat-card" style="--color: #0891b2;">
+                                                <div class="card-title">Alunos a Receber</div>
+                                                <div class="card-value">${stats.toReceiveCount}</div>
+                                                <div class="card-sub">${formatCurrency(stats.toReceiveValue)}</div>
+                                            </div>
+                                            <div class="stat-card" style="--color: #ef4444;">
+                                                <div class="card-title">Inadimpl&ecirc;ncia</div>
+                                                <div class="card-value">${stats.overdueCount}</div>
+                                                <div class="card-sub">${formatCurrency(stats.overdueValue)}</div>
                                             </div>
                                         </div>
 
-                                        <div class="section-title">DISTRIBUIÇÃO POR MODALIDADE (PAGO NO MÊS)</div>
+                                        <div class="section-title">VIS&Atilde;O GERAL DO M&Ecirc;S - ALUNOS PENDENTES E REGULARES</div>
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>Foto</th>
+                                                    <th>Nome</th>
+                                                    <th>Situa&ccedil;&atilde;o</th>
+                                                    <th>Dia pago</th>
+                                                    <th>Pend&ecirc;ncia</th>
+                                                    <th>Valor</th>
+                                                    <th>Cobrar</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>${monthlyRowsHtml}</tbody>
+                                        </table>
+
+                                        <div class="section-title">DISTRIBUI&Ccedil;&Atilde;O POR MODALIDADE (PAGO NO M&Ecirc;S)</div>
                                         <div>
                                             ${Object.entries(stats.modalities).map(([mod]: any) => `
                                                 <div class="modality-item">
@@ -876,19 +1093,7 @@ export default function AdminStats() {
                                             `).join('')}
                                         </div>
 
-                                        <div class="section-title">INADIMPLÊNCIA ATUAL</div>
-                                        <div class="grid">
-                                            <div class="card" style="border-left: 4px solid #ef4444;">
-                                                <div class="card-title">Valor em Atraso</div>
-                                                <div class="card-value" style="color: #ef4444;">${formatCurrency(stats.overdueValue)}</div>
-                                            </div>
-                                            <div class="card" style="border-left: 4px solid #ef4444;">
-                                                <div class="card-title">Qtd. Inadimplentes</div>
-                                                <div class="card-value">${stats.overdueCount}</div>
-                                            </div>
-                                        </div>
-
-                                        <div class="footer">Este documento é um resumo operacional do sistema UBA 2026.</div>
+                                        <div class="footer">Este documento &eacute; um resumo operacional do sistema UBA 2026.</div>
 
                                         <script>
                                             window.onload = () => { window.print(); };
@@ -1080,6 +1285,8 @@ export default function AdminStats() {
                             )}
                         </div>
                     </div>
+
+
                     {/* 1. Alunos Ativos */}
                     <StatCard
                         title="Alunos Ativos"

@@ -6,7 +6,7 @@ import { useDialog } from '../../context/CustomDialogContext';
 import PageTitle from '../../components/PageTitle';
 import PageContainer from '../../components/PageContainer';
 import { SaveIcon, Wifi, WifiOff, Send, X, CheckCircle, RefreshCw } from 'lucide-react';
-import { ensureInstance, sendWhatsApp } from './whatsappUtils';
+import { ensureInstance, resolveWhatsAppApiKey, sendWhatsApp } from './whatsappUtils';
 
 // URL da Evolution API
 const WHATSAPP_SERVICE_URL = (import.meta.env.VITE_WHATSAPP_URL as string) || 'https://evolution-api-im3d.onrender.com';
@@ -34,6 +34,7 @@ interface WhatsAppConfig {
 }
 
 const EMPTY_CONFIG: WhatsAppConfig = { apiKey: '', senderPhone: '', testPhone: '', modoTeste: false, imageUrl: '', pendingImageUrl: '' };
+const QR_REFRESH_MS = 15000;
 
 // ─── Modal de Teste Rápido ─────────────────────────────────────────────
 function TesteModal({ config, onClose }: { config: WhatsAppConfig; onClose: () => void }) {
@@ -132,6 +133,8 @@ export default function AdminMensagensConfig() {
     const [saving, setSaving] = useState(false);
     const [instanceStatus, setInstanceStatus] = useState<'DISCONNECTED' | 'CONNECTED' | 'PENDING' | 'CHECKING'>('CHECKING');
     const [qrCode, setQrCode] = useState<string | null>(null);
+    const [qrUpdatedAt, setQrUpdatedAt] = useState<Date | null>(null);
+    const [qrRefreshing, setQrRefreshing] = useState(false);
     const [showTeste, setShowTeste] = useState(false);
     const { showAlert } = useDialog();
 
@@ -139,10 +142,11 @@ export default function AdminMensagensConfig() {
         const load = async () => {
             try {
                 const snap = await getDoc(doc(db, 'system_settings', 'whatsapp'));
+                const envKey = (import.meta.env.VITE_WHATSAPP_API_KEY as string) || '';
                 if (snap.exists()) {
                     const data = snap.data();
                     const newConfig: WhatsAppConfig = {
-                        apiKey: data.apiKey || (import.meta.env.VITE_WHATSAPP_API_KEY as string) || '',
+                        apiKey: resolveWhatsAppApiKey(data.apiKey || envKey),
                         senderPhone: data.senderPhone || '',
                         testPhone: data.testPhone || '',
                         modoTeste: data.modoTeste === true,
@@ -152,10 +156,10 @@ export default function AdminMensagensConfig() {
                     setConfig(newConfig);
                     if (newConfig.apiKey) checkStatus(newConfig.apiKey);
                 } else {
-                    const envKey = (import.meta.env.VITE_WHATSAPP_API_KEY as string) || '';
                     if (envKey) {
-                        setConfig({ ...EMPTY_CONFIG, apiKey: envKey });
-                        checkStatus(envKey);
+                        const resolvedEnvKey = resolveWhatsAppApiKey(envKey);
+                        setConfig({ ...EMPTY_CONFIG, apiKey: resolvedEnvKey });
+                        checkStatus(resolvedEnvKey);
                     }
                 }
             } finally {
@@ -164,6 +168,16 @@ export default function AdminMensagensConfig() {
         };
         load();
     }, []);
+
+    useEffect(() => {
+        if (!config.apiKey || instanceStatus === 'CONNECTED') return;
+
+        const timer = window.setInterval(() => {
+            fetchQR(config.apiKey, true);
+        }, QR_REFRESH_MS);
+
+        return () => window.clearInterval(timer);
+    }, [config.apiKey, instanceStatus]);
 
     const checkStatus = async (key: string) => {
         setInstanceStatus('CHECKING');
@@ -193,6 +207,7 @@ export default function AdminMensagensConfig() {
             if (json.instance?.state === 'open') {
                 setInstanceStatus('CONNECTED');
                 setQrCode(null);
+                setQrUpdatedAt(null);
             } else {
                 setInstanceStatus('DISCONNECTED');
                 fetchQR(key);
@@ -203,17 +218,22 @@ export default function AdminMensagensConfig() {
         }
     };
 
-    const fetchQR = async (key: string) => {
+    const fetchQR = async (key: string, silent = false) => {
         try {
+            setQrRefreshing(true);
+            if (!silent) setQrCode(null);
             const res = await fetch(`${WHATSAPP_SERVICE_URL}/instance/connect/${INSTANCE_NAME}`, {
                 headers: { 'apikey': key }
             });
             const json = await res.json();
             if (json.base64) {
                 setQrCode(json.base64);
+                setQrUpdatedAt(new Date());
             }
         } catch (e) {
             console.error('Erro ao buscar QR Code', e);
+        } finally {
+            setQrRefreshing(false);
         }
     };
 
@@ -356,6 +376,16 @@ export default function AdminMensagensConfig() {
                         <p style={{ margin: 0, fontSize: '0.9rem', color: '#666', maxWidth: '300px', marginInline: 'auto' }}>
                             Abra o WhatsApp no seu celular, vá em **Aparelhos Conectados** e clique em **Conectar um Aparelho**.
                         </p>
+                        <p style={{ margin: '12px 0 0', fontSize: '0.78rem', color: '#888', fontWeight: 700 }}>
+                            {qrRefreshing ? 'Renovando QR Code...' : `QR renovado ${qrUpdatedAt ? qrUpdatedAt.toLocaleTimeString('pt-BR') : 'agora'}. Atualiza sozinho a cada 15s.`}
+                        </p>
+                        <button
+                            onClick={() => fetchQR(config.apiKey)}
+                            disabled={qrRefreshing || !config.apiKey}
+                            style={{ marginTop: '14px', padding: '10px 16px', borderRadius: '10px', border: '1px solid #cbd5e1', background: '#f8fafc', color: '#334155', fontWeight: 800, cursor: (qrRefreshing || !config.apiKey) ? 'not-allowed' : 'pointer', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                        >
+                            <RefreshCw size={15} /> Gerar QR novo
+                        </button>
                     </div>
                 )}
 

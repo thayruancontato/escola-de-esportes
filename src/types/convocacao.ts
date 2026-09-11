@@ -13,6 +13,7 @@ export interface Convocacao {
     id?: string;
     jogo: string;
     dataUnix: number; // For sorting
+    criadoEm?: number; // Unix ms de quando a convocação foi criada, usado como ano na arte
     tecnico?: string;
     auxiliar?: string;
     rivalNome?: string;

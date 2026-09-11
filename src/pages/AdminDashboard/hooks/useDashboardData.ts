@@ -68,5 +68,10 @@ export function useDashboardData() {
         fetchRegs();
     }, []);
 
-    return { allStudents, turmas, plans, loading };
+    const removeRegistrationIds = (ids: string[]) => {
+        const idSet = new Set(ids);
+        setAllStudents(prev => prev.filter(student => !idSet.has(student.regId)));
+    };
+
+    return { allStudents, turmas, plans, loading, removeRegistrationIds };
 }

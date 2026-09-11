@@ -1,6 +1,8 @@
 
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import PublicForm from './pages/PublicForm';
+import SchoolSystemRequestForm from './pages/SchoolSystemRequestForm';
+import SchoolSystemRequestsView from './pages/SchoolSystemRequestsView';
 import AdminLogin from './pages/AdminLogin';
 import AdminLayout from './layouts/AdminLayout';
 import AdminDashboard from './pages/AdminDashboard/index';
@@ -73,12 +75,8 @@ import AdminSimuladorPage from './pages/AdminSimuladorPage';
 import AdminConvocacaoList from './pages/AdminConvocacaoList';
 import AdminConvocacaoDetails from './pages/AdminConvocacaoDetails';
 import AdminMidias from './pages/AdminMidias';
-import AdminMensagens from './pages/AdminMensagens';
-import AdminMensagensCobrancas from './pages/AdminMensagens/AdminMensagensCobrancas';
-import AdminMensagensAutomacao from './pages/AdminMensagens/AdminMensagensAutomacao';
-import AdminMensagensFila from './pages/AdminMensagens/AdminMensagensFila';
 import AdminMensagensConfig from './pages/AdminMensagens/AdminMensagensConfig';
-import AdminMensagensHistorico from './pages/AdminMensagens/AdminMensagensHistorico';
+import AdminMensagensAvisosAdmin from './pages/AdminMensagens/AdminMensagensAvisosAdmin';
 import AdminStore from './pages/AdminStore';
 
 function App() {
@@ -88,6 +86,8 @@ function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<PublicForm />} />
+            <Route path="/solicitar-sistema-escola" element={<SchoolSystemRequestForm />} />
+            <Route path="/solicitacoes-sistema-escola" element={<SchoolSystemRequestsView />} />
             <Route path="/chamada/:modalidadeId/:turmaId" element={<ChamadaTurma />} />
             <Route path="/chamada-v2/:id" element={<ChamadaTurma />} />
 
@@ -165,12 +165,9 @@ function App() {
               <Route path="midias" element={<AdminMidias />} />
               <Route path="store" element={<AdminStore />} />
               <Route path="jogos/convocacao/:id" element={<AdminConvocacaoDetails />} />
-              <Route path="mensagens" element={<AdminMensagens />} />
-              <Route path="mensagens/cobrancas" element={<AdminMensagensCobrancas />} />
-              <Route path="mensagens/fila" element={<AdminMensagensFila />} />
-              <Route path="mensagens/historico" element={<AdminMensagensHistorico />} />
-              <Route path="mensagens/automacao" element={<AdminMensagensAutomacao />} />
+              <Route path="mensagens" element={<Navigate to="avisos-admin" replace />} />
               <Route path="mensagens/configuracoes" element={<AdminMensagensConfig />} />
+              <Route path="mensagens/avisos-admin" element={<AdminMensagensAvisosAdmin />} />
               <Route index element={<Navigate to="dashboard" replace />} />
             </Route>
 

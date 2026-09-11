@@ -226,6 +226,7 @@ export default function AdminConvocacaoList() {
                 showNumbers,
                 showDataJogo: useDataJogo,
                 dataUnix: useDataJogo && dataJogo ? new Date(dataJogo).getTime() : Date.now(),
+                criadoEm: Date.now(),
                 jogadores: selectedJogadores
             };
 

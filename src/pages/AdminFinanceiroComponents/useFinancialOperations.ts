@@ -15,6 +15,13 @@ interface UseFinancialOperationsProps {
     setRegistrations: React.Dispatch<React.SetStateAction<StudentData[]>>;
 }
 
+export type CarnetPricingMode = 'early' | 'standard' | 'custom';
+
+export interface CarnetPricingChoice {
+    mode: CarnetPricingMode;
+    customMonthlyValue?: number;
+}
+
 export const useFinancialOperations = ({ workerUrl, setRegistrations }: UseFinancialOperationsProps) => {
     const { showAlert, showConfirm } = useDialog();
     const { setLoading: setLoadingOverlay } = useLoading();
@@ -489,7 +496,16 @@ export const useFinancialOperations = ({ workerUrl, setRegistrations }: UseFinan
         } catch (e) { showAlert('Erro', 'error'); }
     };
 
-    const generateBatchCarnet = async (reg: StudentData, plan: Plan, mod: string) => {
+    const resolveCarnetMonthlyValue = (plan: Plan, pricingChoice?: CarnetPricingChoice) => {
+        const standardValue = plan.valores?.mensalidade?.aposVencimento || 0;
+        const earlyValue = plan.valores?.mensalidade?.ateVencimento || standardValue;
+
+        if (pricingChoice?.mode === 'early') return earlyValue;
+        if (pricingChoice?.mode === 'custom') return pricingChoice.customMonthlyValue || standardValue;
+        return standardValue;
+    };
+
+    const generateBatchCarnet = async (reg: StudentData, plan: Plan, mod: string, pricingChoice?: CarnetPricingChoice) => {
         // CPF Validation
         const cpf = reg.responsavel?.cpf || '';
         if (!validateCPF(cpf)) {
@@ -499,6 +515,7 @@ export const useFinancialOperations = ({ workerUrl, setRegistrations }: UseFinan
 
         setLoadingOverlay(true, 'Gerando...');
         try {
+            const mensalidadeValue = resolveCarnetMonthlyValue(plan, pricingChoice);
             const payload = {
                 registrationId: reg.id,
                 responsibleName: reg.responsavel?.nome,
@@ -508,8 +525,8 @@ export const useFinancialOperations = ({ workerUrl, setRegistrations }: UseFinan
                 childName: reg.alunos?.[0]?.nome || '',
                 modalidade: mod,
                 matriculaValue: plan.valores?.matricula || 0,
-                mensalidadeValue: plan.valores?.mensalidade?.aposVencimento || 0,
-                descontoAntecipado: (plan.valores?.mensalidade?.aposVencimento || 0) - (plan.valores?.mensalidade?.ateVencimento || 0),
+                mensalidadeValue,
+                descontoAntecipado: 0,
                 paymentDay: reg.paymentDay || 10,
                 jurosMensais: plan.jurosMensais || 0,
                 multa: plan.multa || 0
@@ -542,14 +559,18 @@ export const useFinancialOperations = ({ workerUrl, setRegistrations }: UseFinan
         finally { setLoadingOverlay(false); }
     };
 
-    const handleMigrateStudent = async (reg: StudentData | null, mod: string, pid: string, plans: Plan[], cb: () => void) => {
+    const handleMigrateStudent = async (reg: StudentData | null, mod: string, pid: string, plans: Plan[], cb: () => void, pricingChoice?: CarnetPricingChoice) => {
         if (!reg) return;
         setIsMigrating(true);
         try {
             const plan = plans.find(p => p.id === pid);
             await updateDoc(doc(db, 'uba_2026_registrations', reg.id), { modalidade: mod, planId: pid });
             showAlert('Migrado.', 'success');
-            showConfirm('Gerar novo carnê agora?', () => { if (plan) generateBatchCarnet({ ...reg, modalidade: mod, planId: pid }, plan, mod); }, 'info', 'Gerar?');
+            if (plan && pricingChoice) {
+                await generateBatchCarnet({ ...reg, modalidade: mod, planId: pid }, plan, mod, pricingChoice);
+            } else {
+                showConfirm('Gerar novo carnê agora?', () => { if (plan) generateBatchCarnet({ ...reg, modalidade: mod, planId: pid }, plan, mod); }, 'info', 'Gerar?');
+            }
             cb();
         } catch (e: any) { showAlert(e.message, 'error'); }
         finally { setIsMigrating(false); }

@@ -569,14 +569,24 @@ export default function ContractEditor({
                         </div>
 
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '80px', gap: '40px' }} {...editableProps}>
-                            <div style={{ flex: 1, textAlign: 'center', borderTop: '1px solid #000', paddingTop: '10px' }}>
-                                <strong>CONTRATADA</strong><br />
-                                UNIÃO BANCÁRIA ATLÉTICA
+                            <div style={{ flex: 1, textAlign: 'center' }}>
+                                <div style={{ height: '62px', marginBottom: '4px' }}></div>
+                                <div style={{ borderTop: '1px solid #000', paddingTop: '10px' }}>
+                                    <strong>CONTRATADA</strong><br />
+                                    UNIÃO BANCÁRIA ATLÉTICA
+                                </div>
                             </div>
-                            <div style={{ flex: 1, textAlign: 'center', borderTop: '1px solid #000', paddingTop: '10px' }}>
-                                <strong>CONTRATANTE</strong><br />
-                                {displayData.responsavel.nome.toUpperCase()}<br />
-                                CPF: {displayData.responsavel.cpf}
+                            <div style={{ flex: 1, textAlign: 'center' }}>
+                                <div style={{ height: '62px', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', marginBottom: '4px' }}>
+                                    {signatureData && (
+                                        <img src={signatureData} alt="Assinatura do contratante" style={{ height: '58px', maxWidth: '95%', objectFit: 'contain' }} />
+                                    )}
+                                </div>
+                                <div style={{ borderTop: '1px solid #000', paddingTop: '10px' }}>
+                                    <strong>CONTRATANTE</strong><br />
+                                    {displayData.responsavel.nome.toUpperCase()}<br />
+                                    CPF: {displayData.responsavel.cpf}
+                                </div>
                             </div>
                         </div>
 
@@ -638,18 +648,7 @@ export default function ContractEditor({
                             </div>
 
                             <div style={{ marginTop: '50px', borderTop: '1px solid #000', paddingTop: '5px', width: '80%', margin: '40px auto 0', textAlign: 'center' }}>
-                                {signatureData ? (
-                                    <div style={{ marginBottom: '10px' }}>
-                                        <img src={signatureData} alt="Assinatura" style={{ height: '60px', maxWidth: '100%' }} />
-                                    </div>
-                                ) : (
-                                    <div style={{ padding: '20px', background: '#f9f9f9', borderRadius: '8px', border: '1px solid #ddd', marginBottom: '10px' }}>
-                                        <p style={{ fontSize: '0.9rem', color: '#999', margin: 0 }}>
-                                            [AGUARDANDO ASSINATURA DIGITAL]
-                                        </p>
-                                    </div>
-                                )}
-                                <center>{signatureData ? '' : '(Espaço para Assinatura)'} Assinatura do Responsável Legal</center>
+                                <center>Assinatura do Responsável Legal</center>
                             </div>
                         </div>
                     </>

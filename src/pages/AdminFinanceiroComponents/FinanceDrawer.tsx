@@ -7,6 +7,11 @@ import { useDialog } from '../../context/CustomDialogContext';
 import { PaymentEditModal } from './PaymentEditModal';
 import { DueDateModal } from './DueDateModal';
 import { CashPaymentModal } from './CashPaymentModal';
+import type { CarnetPricingChoice, CarnetPricingMode } from './useFinancialOperations';
+
+type PricingAction =
+    | { type: 'refaturar'; plan: Plan; modality: string }
+    | { type: 'migrate'; plan: Plan; modality: string; planId: string };
 
 interface FinanceDrawerProps {
     registration: StudentData | null;
@@ -18,11 +23,11 @@ interface FinanceDrawerProps {
 
     // Hook Functions
     // syncSingleRegistration: (reg: StudentData) => void; // Unused
-    handleMigrateStudent: (reg: StudentData | null, mod: string, planId: string, plans: Plan[], cb: () => void) => Promise<void>;
+    handleMigrateStudent: (reg: StudentData | null, mod: string, planId: string, plans: Plan[], cb: () => void, pricingChoice?: CarnetPricingChoice) => Promise<void>;
     handleCreateManualCharge: (reg: StudentData | null, data: any, plans: Plan[]) => Promise<boolean>;
     handleDeletePayment: (id: string, reg: StudentData | null) => Promise<void>;
     handleDeleteAllPayments: (reg: StudentData | null) => Promise<void>;
-    generateBatchCarnet: (reg: StudentData, plan: Plan, modality: string) => Promise<void>;
+    generateBatchCarnet: (reg: StudentData, plan: Plan, modality: string, pricingChoice?: CarnetPricingChoice) => Promise<void>;
     handleUpdateDueDate: (id: string, date: string, reg: StudentData | null, cb: () => void) => Promise<void>;
     handleUpdatePayment: (id: string, form: any, reg: StudentData | null, originalPayment?: any) => Promise<void>;
     handleRestoreDiscount: (id: string, reg: StudentData | null) => Promise<void>;
@@ -49,7 +54,7 @@ export function FinanceDrawer({
     handleReceiveInCash,
     readOnly
 }: FinanceDrawerProps) {
-    const { showConfirm, showAlert } = useDialog();
+    const { showAlert } = useDialog();
 
     // Drawer State
     const [activeTab, setActiveTab] = useState<'plan' | 'manual'>('plan');
@@ -63,6 +68,9 @@ export function FinanceDrawer({
     // Migration Form
     const [migrationModality, setMigrationModality] = useState('');
     const [migrationPlanId, setMigrationPlanId] = useState('');
+    const [pricingAction, setPricingAction] = useState<PricingAction | null>(null);
+    const [pricingMode, setPricingMode] = useState<CarnetPricingMode>('standard');
+    const [customMonthlyValue, setCustomMonthlyValue] = useState('');
 
     useEffect(() => {
         if (registration) {
@@ -94,9 +102,14 @@ export function FinanceDrawer({
             showAlert("Selecione um plano.", "error");
             return;
         }
-        await handleMigrateStudent(registration, migrationModality, migrationPlanId, plans, () => {
-            setShowMigration(false);
-        });
+        const plan = plans.find(p => p.id === migrationPlanId);
+        if (!plan) {
+            showAlert("Plano selecionado nao encontrado.", "error");
+            return;
+        }
+        setPricingMode('standard');
+        setCustomMonthlyValue('');
+        setPricingAction({ type: 'migrate', plan, modality: migrationModality, planId: migrationPlanId });
     };
 
     const onCreateCharge = async () => {
@@ -145,14 +158,44 @@ export function FinanceDrawer({
             return;
         }
 
-        showConfirm(
-            `Deseja refaturar o aluno ${registration.alunos[0]?.nome}? Isso irá gerar todos os boletos do plano atual (${plan.nome}).\n\n(DICA: Certifique-se de que não há boletos duplicados em aberto antes de gerar novos)`,
-            () => {
-                generateBatchCarnet(registration, plan, registration.modalidade);
-            },
-            'warning',
-            'Refaturar Aluno?'
-        );
+        setPricingMode('standard');
+        setCustomMonthlyValue('');
+        setPricingAction({ type: 'refaturar', plan, modality: registration.modalidade });
+    };
+
+    const formatMoneyFromCents = (value = 0) => {
+        return (value / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    };
+
+    const buildPricingChoice = (): CarnetPricingChoice | null => {
+        if (pricingMode !== 'custom') return { mode: pricingMode };
+
+        const parsed = parseFloat(customMonthlyValue.replace(',', '.'));
+        if (isNaN(parsed) || parsed <= 0) {
+            showAlert('Informe um valor especifico valido.', 'error');
+            return null;
+        }
+
+        return { mode: 'custom', customMonthlyValue: Math.round(parsed * 100) };
+    };
+
+    const handleConfirmPricingAction = async () => {
+        if (!pricingAction) return;
+
+        const pricingChoice = buildPricingChoice();
+        if (!pricingChoice) return;
+
+        const action = pricingAction;
+        setPricingAction(null);
+
+        if (action.type === 'refaturar') {
+            await generateBatchCarnet(registration, action.plan, action.modality, pricingChoice);
+            return;
+        }
+
+        await handleMigrateStudent(registration, action.modality, action.planId, plans, () => {
+            setShowMigration(false);
+        }, pricingChoice);
     };
 
     // Filter Logic: We no longer filter by tab here so both Manual and Plan faturas appear 
@@ -502,6 +545,102 @@ export function FinanceDrawer({
             </div>
 
             {/* Modals */}
+            {pricingAction && (
+                <div style={{
+                    position: 'fixed', inset: 0, zIndex: 3000,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: 'rgba(0,0,0,0.55)', padding: '20px'
+                }}>
+                    <div style={{
+                        width: '100%', maxWidth: '520px', background: '#fff',
+                        borderRadius: '8px', boxShadow: '0 20px 45px rgba(0,0,0,0.22)',
+                        overflow: 'hidden'
+                    }}>
+                        <div style={{ padding: '18px 22px', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', gap: '16px' }}>
+                            <div>
+                                <div style={{ color: '#c32228', fontWeight: 900, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                                    {pricingAction.type === 'refaturar' ? 'Refaturar aluno' : 'Migrar e gerar faturas'}
+                                </div>
+                                <h3 style={{ margin: '5px 0 0', fontSize: '1.05rem', color: '#111' }}>
+                                    Escolha o valor das mensalidades
+                                </h3>
+                                <div style={{ marginTop: '4px', fontSize: '0.82rem', color: '#666' }}>
+                                    {pricingAction.plan.nome}
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setPricingAction(null)}
+                                style={{ width: '34px', height: '34px', border: 'none', borderRadius: '8px', background: '#f5f5f5', color: '#666', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+                            >
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        <div style={{ padding: '22px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            {pricingAction.type === 'refaturar' && (
+                                <div style={{ padding: '12px', background: '#fff8e1', border: '1px solid #ffe0a3', borderRadius: '8px', color: '#6b4b00', fontSize: '0.82rem', fontWeight: 700 }}>
+                                    Confira se nao existem faturas abertas duplicadas antes de gerar novas.
+                                </div>
+                            )}
+
+                            {([
+                                ['early', 'Preco com desconto antecipado', pricingAction.plan.valores?.mensalidade?.ateVencimento || 0],
+                                ['standard', 'Preco padrao', pricingAction.plan.valores?.mensalidade?.aposVencimento || 0],
+                                ['custom', 'Valor especifico', null]
+                            ] as const).map(([mode, label, value]) => (
+                                <button
+                                    key={mode}
+                                    onClick={() => setPricingMode(mode)}
+                                    style={{
+                                        width: '100%', padding: '13px 14px', borderRadius: '8px',
+                                        border: `1px solid ${pricingMode === mode ? '#c32228' : '#ddd'}`,
+                                        background: pricingMode === mode ? '#fff0f0' : '#fff',
+                                        color: pricingMode === mode ? '#c32228' : '#333',
+                                        cursor: 'pointer', display: 'flex', justifyContent: 'space-between',
+                                        alignItems: 'center', gap: '12px', textAlign: 'left'
+                                    }}
+                                >
+                                    <span style={{ fontWeight: 900, fontSize: '0.86rem' }}>{label}</span>
+                                    <span style={{ fontWeight: 900, fontSize: '0.86rem', whiteSpace: 'nowrap' }}>
+                                        {value === null ? 'Informar' : formatMoneyFromCents(value)}
+                                    </span>
+                                </button>
+                            ))}
+
+                            {pricingMode === 'custom' && (
+                                <div>
+                                    <label style={{ display: 'block', fontSize: '0.72rem', fontWeight: 900, color: '#777', marginBottom: '6px', textTransform: 'uppercase' }}>
+                                        Valor mensal personalizado (R$)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={customMonthlyValue}
+                                        onChange={(e) => setCustomMonthlyValue(e.target.value.replace(/[^\d,]/g, ''))}
+                                        placeholder="Ex: 150,00"
+                                        style={{ width: '100%', padding: '12px', border: '1px solid #ddd', borderRadius: '8px', outline: 'none', fontWeight: 800 }}
+                                    />
+                                </div>
+                            )}
+                        </div>
+
+                        <div style={{ padding: '16px 22px', borderTop: '1px solid #eee', display: 'flex', gap: '10px' }}>
+                            <button
+                                onClick={() => setPricingAction(null)}
+                                style={{ flex: 1, padding: '12px', borderRadius: '8px', border: '1px solid #ddd', background: '#fff', color: '#666', fontWeight: 900, cursor: 'pointer' }}
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                onClick={handleConfirmPricingAction}
+                                style={{ flex: 1.4, padding: '12px', borderRadius: '8px', border: 'none', background: '#c32228', color: '#fff', fontWeight: 900, cursor: 'pointer' }}
+                            >
+                                Gerar faturas
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <PaymentEditModal
                 isOpen={!!editingPayment}
                 payment={editingPayment}

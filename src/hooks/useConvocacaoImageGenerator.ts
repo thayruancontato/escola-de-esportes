@@ -15,9 +15,16 @@ export function useConvocacaoImageGenerator() {
 
             const img = new Image();
             img.crossOrigin = 'Anonymous';
-            img.src = layout === 'individual' ? '/convocacao-individual.png' : '/convocacao.png';
+            img.src = layout === 'individual' ? '/convocacao-individual.png' : '/convocacao-geral-base.png';
 
             img.onload = async () => {
+                try {
+                    await Promise.all([
+                        document.fonts.load('900 100px "Montserrat"'),
+                        document.fonts.load('400 100px "Anton"'),
+                    ]);
+                } catch (e) { /* segue com a fonte de fallback do sistema */ }
+
                 // Set canvas dimensions to match the image exactly
                 canvas.width = img.width;
                 canvas.height = img.height;
@@ -56,7 +63,6 @@ export function useConvocacaoImageGenerator() {
                 };
 
                 const redColor = '#E31B23';
-                const grayColor = '#AAAAAA';
                 const darkText = '#111111';
 
                 const titulares = convocacao.jogadores.filter(j => j.categoria === 'titular');
@@ -371,164 +377,214 @@ export function useConvocacaoImageGenerator() {
 
                 } else {
                     // ============================================
-                    // LAYOUT GERAL (UBA Padrão)
+                    // LAYOUT GERAL (Modelo Copa Diamante)
                     // ============================================
-                    const bannerWidth = canvasW * 0.12;
-                    const contentLeft = bannerWidth + (canvasW * 0.04);
+                    const NAVY = '#0B1B3F';
+                    const RED_NEW = '#C40404';
+                    const leftMargin = canvasW * 0.0625;
+                    const rightEdge = canvasW * 0.9336;
 
-                    // 1. Desenha "STARTING XI" Vertical
-                    ctx.save();
-                    ctx.translate(bannerWidth * 0.5, canvasH * 0.15);
-                    ctx.rotate(-Math.PI / 2);
-                    ctx.font = `800 ${canvasH * 0.025}px "Montserrat", sans-serif`;
-                    ctx.fillStyle = '#333333';
-                    ctx.textAlign = 'center';
-                    ctx.restore();
-
-                    // 2. NOME DO JOGO
-                    ctx.font = `800 ${canvasH * 0.020}px "Montserrat", sans-serif`;
-                    ctx.fillStyle = redColor;
-                    ctx.textAlign = 'left';
-                    ctx.fillText(convocacao.jogo.toUpperCase(), contentLeft, canvasH * 0.145);
-
-                    // 3. Data e Hora
-                    if (convocacao.showDataJogo !== false) {
-                        const monthText = dateObj.toLocaleDateString('pt-BR', { month: 'long' }).toUpperCase();
-                        const fullInfo = `${day} ${monthText} | ${gameTime}H`;
-
-                        ctx.font = `800 ${canvasH * 0.020}px "Montserrat", sans-serif`;
-                        ctx.fillStyle = grayColor;
-                        ctx.textAlign = 'left';
-                        ctx.fillText(fullInfo, contentLeft, canvasH * 0.175);
-                    }
-
-                    // Separator
-                    ctx.beginPath();
-                    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-                    ctx.lineWidth = 1;
-                    ctx.moveTo(contentLeft, canvasH * 0.195);
-                    ctx.lineTo(contentLeft + 250, canvasH * 0.195);
-                    ctx.stroke();
-
-                    // TITULARES
-                    const startYTits = convocacao.showDataJogo !== false ? canvasH * 0.20 : canvasH * 0.175;
-                    const hasManyTitulares = titulares.length > 12;
-                    const titLineHeight = hasManyTitulares ? canvasH * 0.022 : canvasH * 0.026;
-                    const numFontSize = hasManyTitulares ? canvasH * 0.014 : canvasH * 0.017;
-                    const nameFontSize = hasManyTitulares ? canvasH * 0.014 : canvasH * 0.017;
-
-                    for (let i = 0; i < titulares.length; i++) {
-                        const t = titulares[i];
-                        const y = startYTits + (i * titLineHeight);
-
-                        if (t.numero && convocacao.showNumbers !== false) {
-                            ctx.font = `800 ${numFontSize}px "Montserrat", sans-serif`;
-                            ctx.fillStyle = redColor;
-                            ctx.textAlign = 'right';
-                            ctx.fillText(t.numero, contentLeft + (canvasW * 0.03), y);
-                        }
-
-                        ctx.font = `800 ${nameFontSize}px "Montserrat", sans-serif`;
-                        ctx.fillStyle = '#FFFFFF';
-                        ctx.textAlign = 'left';
-
-                        const nameX = contentLeft + (t.numero && convocacao.showNumbers !== false ? canvasW * 0.07 : canvasW * 0.01);
-                        ctx.fillText(formatDisplayName(t.nome).toUpperCase(), nameX, y);
-                    }
-
-                    // RESERVAS
-                    if (reservas.length > 0) {
-                        const boxTop = canvasH * 0.60;
-                        const boxLeft = canvasW * 0.12;
-                        const boxWidth = canvasW * 0.42;
-
-                        ctx.font = `800 ${canvasH * 0.011}px "Montserrat", sans-serif`;
-                        ctx.fillStyle = '#FFFFFF';
-                        ctx.textAlign = 'left';
-                        ctx.fillText('SUBSTITUTOS', boxLeft, boxTop + (canvasH * 0.022));
-
-                        ctx.font = `700 ${canvasH * 0.009}px "Open Sans", sans-serif`;
-                        const resNames = reservas.map(r => formatDisplayName(r.nome).toUpperCase()).join(', ');
-
-                        const words = resNames.split(' ');
-                        let line = '';
-                        let lineCount = 0;
-                        const resStartLineY = boxTop + (canvasH * 0.045);
-                        const resLineHeight = canvasH * 0.012;
-
-                        for (let n = 0; n < words.length; n++) {
-                            const testLine = line + words[n] + ' ';
-                            const metrics = ctx.measureText(testLine);
-                            if (metrics.width > boxWidth && n > 0) {
-                                ctx.fillText(line.trim(), boxLeft, resStartLineY + (lineCount * resLineHeight));
-                                line = words[n] + ' ';
-                                lineCount++;
+                    const wrapWords = (words: string[], maxWidth: number) => {
+                        const lines: string[] = [];
+                        let current = '';
+                        for (const w of words) {
+                            const test = current ? `${current} ${w}` : w;
+                            if (!current || ctx.measureText(test).width <= maxWidth) {
+                                current = test;
                             } else {
-                                line = testLine;
+                                lines.push(current);
+                                current = w;
                             }
                         }
-                        ctx.fillText(line.trim(), boxLeft, resStartLineY + (lineCount * resLineHeight));
-                    }
+                        if (current) lines.push(current);
+                        return lines;
+                    };
 
+                    // 1. TÍTULO DO JOGO (entre a linha de estrelas e o selo vermelho)
+                    // Calcula o MAIOR tamanho de fonte possível que caiba em até 2 linhas,
+                    // respeitando tanto a largura quanto a altura do espaço disponível.
+                    const jogoRaw = (convocacao.jogo || '').trim();
+                    const titleWordsUpper = jogoRaw.split(/\s+/).filter(Boolean).map(w => w.toUpperCase());
 
+                    const titleCenterX = canvasW * 0.345; // mesmo centro do selo vermelho e da linha de estrelas
+                    const titleMaxWidth = canvasW * 0.58;
+                    const titleGapTop = canvasH * 0.118;
+                    const titleGapBottom = canvasH * 0.27;
+                    const titleGapHeight = titleGapBottom - titleGapTop;
+                    const titlePitchFactor = 1.05; // espaço vertical entre o centro de cada linha
 
-                    // CONFRONTO (Opcional)
-                    // Só desenha bloco de confronto se tem rival
-                    const hasConfronto = !!(convocacao.rivalNome || convocacao.rivalLogo);
-                    const logoSizeConf = canvasH * 0.065;
-                    const vsX = canvasW * 0.32;
-                    const vsY = canvasH * 0.77;
-                    const spacing = canvasW * 0.11;
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = NAVY;
 
-                    if (hasConfronto) {
-
-                        const drawTeam = async (name: string | undefined, logoUrl: string | undefined, x: number) => {
-                            if (logoUrl) {
-                                try {
-                                    const tImg = new Image();
-                                    tImg.crossOrigin = 'Anonymous';
-                                    await new Promise((res, rej) => {
-                                        tImg.onload = res;
-                                        tImg.onerror = rej;
-                                        tImg.src = logoUrl;
-                                    });
-                                    let dw = logoSizeConf;
-                                    let dh = logoSizeConf;
-                                    const ratio = tImg.width / tImg.height;
-                                    if (ratio > 1) { dh = logoSizeConf / ratio; } else { dw = logoSizeConf * ratio; }
-                                    ctx.drawImage(tImg, x - (dw / 2), vsY - (dh / 2), dw, dh);
-                                } catch (e) { }
-                            }
-                            if (name) {
-                                ctx.font = `800 ${canvasH * 0.010}px "Montserrat", sans-serif`;
-                                ctx.fillStyle = '#FFFFFF';
-                                ctx.textAlign = 'center';
-                                ctx.fillText(name.toUpperCase(), x, vsY + (logoSizeConf / 2) + (canvasH * 0.020));
-                            }
+                    if (titleWordsUpper.length > 0) {
+                        // Sem limite fixo de linhas: o título nunca perde palavras, só encolhe até caber na altura disponível
+                        const tryFit = (size: number): string[] | null => {
+                            ctx.font = `400 ${size}px "Anton", sans-serif`;
+                            const lines = wrapWords(titleWordsUpper, titleMaxWidth);
+                            const widest = Math.max(...lines.map(l => ctx.measureText(l).width));
+                            if (widest > titleMaxWidth) return null;
+                            const neededHeight = lines.length * size * titlePitchFactor;
+                            if (neededHeight > titleGapHeight) return null;
+                            return lines;
                         };
 
-                        await drawTeam(convocacao.casaNome, convocacao.casaLogo, vsX - spacing);
-                        ctx.font = `900 ${canvasH * 0.018}px "Montserrat", sans-serif`;
-                        ctx.fillStyle = redColor;
-                        ctx.textAlign = 'center';
-                        ctx.fillText('VS', vsX, vsY);
-                        await drawTeam(convocacao.rivalNome, convocacao.rivalLogo, vsX + spacing);
+                        let lo = canvasH * 0.014;
+                        let hi = canvasH * 0.085;
+                        let bestSize = lo;
+                        let bestLines: string[];
+                        ctx.font = `400 ${lo}px "Anton", sans-serif`;
+                        bestLines = tryFit(lo) || wrapWords(titleWordsUpper, titleMaxWidth);
+
+                        for (let i = 0; i < 22; i++) {
+                            const mid = (lo + hi) / 2;
+                            const lines = tryFit(mid);
+                            if (lines) {
+                                bestSize = mid;
+                                bestLines = lines;
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+
+                        ctx.font = `400 ${bestSize}px "Anton", sans-serif`;
+                        const pitch = bestSize * titlePitchFactor;
+                        const blockCenterY = (titleGapTop + titleGapBottom) / 2;
+                        const startY = blockCenterY - ((bestLines.length - 1) * pitch) / 2;
+                        ctx.strokeStyle = '#fdfdfd';
+                        ctx.lineWidth = Math.max(2, bestSize * 0.05);
+                        ctx.lineJoin = 'round';
+                        bestLines.forEach((line, i) => {
+                            const lineY = startY + (i * pitch);
+                            ctx.strokeText(line, titleCenterX, lineY, titleMaxWidth);
+                            ctx.fillText(line, titleCenterX, lineY, titleMaxWidth);
+                        });
                     }
+                    ctx.textAlign = 'left';
 
-                    // TÉCNICO (Sempre desenha se houver nome, independente de confronto)
-                    if (convocacao.tecnico) {
-                        const techY = vsY + (logoSizeConf / 2) + (canvasH * 0.055);
+                    // Selo vermelho: ano em que a convocação foi criada
+                    const yearBadge = new Date(convocacao.criadoEm || convocacao.dataUnix || Date.now()).getFullYear().toString();
+                    ctx.font = `400 ${canvasH * 0.033}px "Anton", sans-serif`;
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(yearBadge, titleCenterX, canvasH * 0.306);
+                    ctx.textAlign = 'left';
 
-                        ctx.font = `600 ${canvasH * 0.008}px "Open Sans", sans-serif`;
-                        ctx.fillStyle = grayColor;
-                        ctx.textAlign = 'left';
-                        ctx.fillText('TÉCNICO | TREINADOR', contentLeft, techY);
+                    // 2. CAIXA DE CATEGORIA + INFOS DO JOGO
+                    const catBoxX = leftMargin;
+                    const catBoxY = canvasH * 0.3928;
+                    const catBoxW = canvasW * 0.2529;
+                    const catBoxH = canvasH * 0.0965;
 
-                        ctx.font = `800 ${canvasH * 0.013}px "Montserrat", sans-serif`;
+                    // Categoria = turma mais comum entre os convocados (ex: "Sub 11")
+                    const turmaCounts = new Map<string, number>();
+                    convocacao.jogadores.forEach(j => {
+                        const t = (j.turma || '').trim();
+                        if (t) turmaCounts.set(t, (turmaCounts.get(t) || 0) + 1);
+                    });
+                    let categoria = '';
+                    let bestCount = 0;
+                    turmaCounts.forEach((count, turma) => {
+                        if (count > bestCount) { bestCount = count; categoria = turma; }
+                    });
+                    categoria = categoria.toUpperCase();
+
+                    if (categoria) {
+                        ctx.font = `400 ${canvasH * 0.036}px "Anton", sans-serif`;
                         ctx.fillStyle = '#FFFFFF';
-                        const coachName = (convocacao.tecnico || '').toUpperCase();
-                        ctx.fillText(coachName, contentLeft, techY + (canvasH * 0.022), canvasW * 0.45);
+                        ctx.textAlign = 'center';
+                        ctx.fillText(categoria, catBoxX + (catBoxW / 2), catBoxY + (catBoxH / 2), catBoxW * 0.85);
+                        ctx.textAlign = 'left';
                     }
+
+                    // Infos (dia / hora / confronto) na área branca à direita da caixa de categoria
+                    const infoX = canvasW * 0.352;
+                    const infoMaxWidth = rightEdge - infoX - (canvasW * 0.015);
+                    const infoLine1Y = catBoxY + (catBoxH * 0.285);
+                    const infoLine2Y = catBoxY + (catBoxH * 0.595);
+                    const infoLine3Y = catBoxY + (catBoxH * 0.88);
+                    const infoFont = canvasH * 0.0175;
+
+                    ctx.font = `800 ${infoFont}px "Montserrat", sans-serif`;
+                    ctx.fillStyle = NAVY;
+
+                    if (convocacao.showDataJogo !== false) {
+                        const weekday = dateObj.toLocaleDateString('pt-BR', { weekday: 'long' }).toUpperCase();
+                        ctx.fillText(`${weekday} – ${day}/${month}`, infoX, infoLine1Y, infoMaxWidth);
+                        ctx.fillText(`${gameTime}${categoria ? ` – ${categoria}` : ''}`, infoX, infoLine2Y, infoMaxWidth);
+                    } else {
+                        ctx.fillText('DATA A CONFIRMAR', infoX, infoLine1Y, infoMaxWidth);
+                        if (categoria) ctx.fillText(categoria, infoX, infoLine2Y, infoMaxWidth);
+                    }
+
+                    if (convocacao.rivalNome && convocacao.rivalNome.trim()) {
+                        const casaNameGeral = (convocacao.casaNome || 'UBA FC').trim().toUpperCase();
+                        const rivalNameGeral = convocacao.rivalNome.trim().toUpperCase();
+                        const casaW = ctx.measureText(casaNameGeral).width;
+                        const xLabelW = ctx.measureText('   X   ').width;
+
+                        ctx.fillStyle = NAVY;
+                        ctx.fillText(casaNameGeral, infoX, infoLine3Y, infoMaxWidth * 0.42);
+                        ctx.fillStyle = RED_NEW;
+                        ctx.textAlign = 'center';
+                        ctx.fillText('X', infoX + casaW + (xLabelW / 2), infoLine3Y);
+                        ctx.textAlign = 'left';
+                        ctx.fillStyle = NAVY;
+                        ctx.fillText(rivalNameGeral, infoX + casaW + xLabelW, infoLine3Y, infoMaxWidth - casaW - xLabelW);
+                    }
+
+                    // 3. BARRA "CONVOCADOS"
+                    const barCenterY = canvasH * 0.5323;
+                    ctx.font = `400 ${canvasH * 0.03}px "Anton", sans-serif`;
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.textAlign = 'center';
+                    (ctx as any).letterSpacing = '2px';
+                    ctx.fillText('CONVOCADOS', canvasW * 0.5, barCenterY);
+                    (ctx as any).letterSpacing = '0px';
+                    ctx.textAlign = 'left';
+
+                    // 4. LISTA DE CONVOCADOS (duas colunas, ordem alfabética, nomes completos)
+                    const allPlayers = [...titulares, ...reservas].sort((a, b) =>
+                        (a.nome || '').trim().localeCompare((b.nome || '').trim(), 'pt-BR', { sensitivity: 'base' })
+                    );
+                    const totalPlayers = allPlayers.length;
+                    const rows = Math.max(1, Math.ceil(totalPlayers / 2));
+                    const listTop = canvasH * 0.60;
+                    const listBottom = canvasH * 0.90;
+                    const naturalPitch = (listBottom - listTop) / 7; // ritmo dos traços pontilhados da arte-base (8 linhas)
+                    const rowPitch = rows > 1 ? Math.min(naturalPitch, (listBottom - listTop) / (rows - 1)) : 0;
+                    const nameFontSize = Math.max(canvasH * 0.009, Math.min(canvasH * 0.0225, rowPitch > 0 ? rowPitch * 0.5 : canvasH * 0.0225));
+
+                    const colLeftX = canvasW * 0.1016;
+                    const colLeftMaxW = canvasW * 0.377;
+                    const colRightX = canvasW * 0.551;
+                    const colRightMaxW = canvasW * 0.363;
+
+                    allPlayers.forEach((p, i) => {
+                        const col = i < rows ? 0 : 1;
+                        const row = i < rows ? i : i - rows;
+                        const x = col === 0 ? colLeftX : colRightX;
+                        const maxW = col === 0 ? colLeftMaxW : colRightMaxW;
+                        const y = rows > 1 ? listTop + (row * rowPitch) : (listTop + listBottom) / 2;
+
+                        const hasJerseyNumber = convocacao.showNumbers !== false && !!String(p.numero || '').trim();
+                        let numberWidth = 0;
+
+                        if (hasJerseyNumber) {
+                            ctx.font = `900 ${nameFontSize}px "Montserrat", sans-serif`;
+                            ctx.fillStyle = RED_NEW;
+                            ctx.textAlign = 'left';
+                            const numberLabel = `${String(p.numero).trim()}.`;
+                            ctx.fillText(numberLabel, x, y);
+                            numberWidth = ctx.measureText(numberLabel).width;
+                        }
+
+                        ctx.font = `700 ${nameFontSize}px "Montserrat", sans-serif`;
+                        ctx.fillStyle = NAVY;
+                        ctx.textAlign = 'left';
+                        const nameGap = hasJerseyNumber ? canvasW * 0.012 : 0;
+                        ctx.fillText((p.nome || '').trim(), x + numberWidth + nameGap, y, maxW - numberWidth - nameGap);
+                    });
                 } // Fim Geral
 
                 resolve(canvas.toDataURL('image/png'));

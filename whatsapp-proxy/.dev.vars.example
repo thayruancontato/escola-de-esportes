@@ -1,0 +1,13 @@
+# Copie este arquivo para .dev.vars apenas no ambiente local.
+# Nunca publique tokens reais no Git.
+
+# Token da Evolution API usado para enviar mensagens via WhatsApp.
+EVOLUTION_API_KEY="coloque_aqui_o_token_da_evolution"
+
+# Token da API Asaas usado para criar, consultar, atualizar, excluir
+# e marcar cobranças como recebidas.
+ASAAS_API_KEY="coloque_aqui_o_token_do_asaas"
+
+# Opcional: sobrescreva as variáveis públicas do wrangler.toml em ambiente local.
+# FIREBASE_PROJECT_ID="cadastro-uba"
+# FIREBASE_API_KEY="api_key_publica_do_firebase"

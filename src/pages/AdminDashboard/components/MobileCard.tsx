@@ -8,16 +8,39 @@ interface MobileCardProps {
     onNavigate: (regId: string) => void;
     onResendApproval: (item: Student) => void;
     filterStatus?: string;
+    selectionEnabled?: boolean;
+    selected?: boolean;
+    onToggleSelection?: (regId: string) => void;
 }
 
-export const MobileCard: React.FC<MobileCardProps> = ({ item, turmas, onNavigate, onResendApproval, filterStatus }) => {
+export const MobileCard: React.FC<MobileCardProps> = ({
+    item,
+    turmas,
+    onNavigate,
+    onResendApproval,
+    filterStatus,
+    selectionEnabled = false,
+    selected = false,
+    onToggleSelection
+}) => {
     const student = item.aluno;
     const turma = turmas.find(t => t.id === student?.turmaId);
     const isDesativados = filterStatus === 'desativados';
 
     return (
-        <div style={{ background: '#fff', borderRadius: '6px', padding: '12px', boxShadow: '0 2px 6px rgba(0,0,0,0.05)', border: '1px solid #eee' }}>
+        <div style={{ background: selected ? '#e9f8ef' : '#fff', borderRadius: '6px', padding: '12px', boxShadow: '0 2px 6px rgba(0,0,0,0.05)', border: selected ? '1px solid #007d2f' : '1px solid #eee' }}>
             <div style={{ display: 'flex', gap: '12px', marginBottom: '10px' }}>
+                {selectionEnabled && (
+                    <label style={{ display: 'flex', alignItems: 'center', alignSelf: 'flex-start', paddingTop: '10px' }}>
+                        <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => onToggleSelection?.(item.regId)}
+                            aria-label={`Selecionar cadastro de ${student?.nome || 'aluno'}`}
+                            style={{ width: '18px', height: '18px', accentColor: '#007d2f' }}
+                        />
+                    </label>
+                )}
                 {student?.fotoUrl ? <img src={student.fotoUrl} style={{ width: '40px', height: '40px', borderRadius: '4px', objectFit: 'cover' }} /> : <div style={{ width: '40px', height: '40px', background: '#f8f9fa' }} />}
                 <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: '700', fontSize: '0.9rem' }}>{student?.nome || 'Sem Aluno'}</div>

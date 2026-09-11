@@ -6,6 +6,7 @@ import { useDialog } from '../context/CustomDialogContext';
 import { collection, addDoc, serverTimestamp, doc, getDoc } from 'firebase/firestore';
 import { findOrCreateTurma } from '../utils/turmaService';
 import { SCHEDULE_OPTIONS } from '../utils/turmasConstants';
+import { notifyAdminNewRegistration } from '../utils/adminNotifications';
 
 // Types
 interface Student {
@@ -684,7 +685,7 @@ export default function PublicForm() {
         }
       };
 
-      await addDoc(collection(db, 'uba_2026_registrations'), {
+      const regDocRef = await addDoc(collection(db, 'uba_2026_registrations'), {
         ...normalizedData,
         planId: autoPlanId || (data.modalidade === 'voleibol' ? data.planoVoleibol : ''), // Assign auto-plan or manual voleibol plan
         alunos: updatedAlunos, // Use updated students with turmaId
@@ -699,6 +700,23 @@ export default function PublicForm() {
         userAgent: navigator.userAgent,
         debug_v2: true // Debug flag to identify registrations from this version
       });
+
+      // Aviso ao administrador (não bloqueia o fluxo de sucesso se falhar)
+      const primeiroAluno = updatedAlunos[0];
+      const turmaHorario = selectedSchedule?.days?.length
+        ? `${selectedSchedule.days.join('/')} · ${selectedSchedule.time || ''}`.trim()
+        : '';
+      notifyAdminNewRegistration({
+        registrationId: regDocRef.id,
+        nome: primeiroAluno?.nome || '',
+        modalidade: data.modalidade,
+        dataNascimento: primeiroAluno?.dataNascimento,
+        fotoUrl: primeiroAluno?.fotoUrl,
+        responsavelNome: data.responsavel.nome,
+        telefone: data.responsavel.telefonePrincipal,
+        email: data.responsavel.email,
+        turmaHorario,
+      }).catch(err => console.error('Falha ao notificar admin sobre nova inscrição:', err));
 
       // NO PAYMENT GENERATION - ASAAS DISABLED
       // Directly go to success

@@ -1,4 +1,4 @@
-import { doc, getDoc, collection, addDoc, query, orderBy, limit, getDocs, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, collection, addDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
 
 export const WHATSAPP_SERVICE_URL =
@@ -8,9 +8,19 @@ export const WORKER_URL =
     (import.meta.env.VITE_WORKER_URL as string) || 'https://uba-whatsapp-proxy.thayrufino2.workers.dev';
 
 const GLOBAL_API_KEY = (import.meta.env.VITE_WHATSAPP_API_KEY as string) || '';
-const INSTANCE_NAME = 'uba_instance';
+export const INSTANCE_NAME = 'uba_instance';
 
 export const TEST_PHONE = '5533998200546';
+
+function isUsableApiKey(key?: string) {
+    const normalizedKey = (key || '').trim();
+    return normalizedKey.length >= 20 && !normalizedKey.includes('*') && !normalizedKey.includes('•') && normalizedKey !== 'worker-managed';
+}
+
+export function resolveWhatsAppApiKey(apiKey?: string) {
+    const normalizedKey = (apiKey || '').trim();
+    return GLOBAL_API_KEY || (isUsableApiKey(normalizedKey) ? normalizedKey : '');
+}
 
 export interface WhatsAppFullConfig {
     apiKey: string;
@@ -25,19 +35,6 @@ export interface WhatsAppFullConfig {
     birthdayTemplateText?: string;
     birthdayDefaultImage?: string;
     birthdayAutomationTestMode?: boolean;
-    // Automação Financeira
-    finAutoBeforeEnabled?: boolean;
-    finAutoBeforeDays?: number;
-    finAutoOnDayEnabled?: boolean;
-    finAutoAfterEnabled?: boolean;
-    finAutoAfterDays?: number;
-    finAutoTestMode?: boolean;
-    finAutoSendTime?: string;
-    // Agendamento de Teste Único
-    finAutoTestDate?: string;
-    finAutoTestTime?: string;
-    finAutoTestSentAt?: string; // Log para evitar reenvio
-    finAutoTestResult?: string;
 }
 
 /**
@@ -46,10 +43,24 @@ export interface WhatsAppFullConfig {
 export async function loadWhatsAppConfig(): Promise<WhatsAppFullConfig | null> {
     try {
         const snap = await getDoc(doc(db, 'system_settings', 'whatsapp'));
-        if (!snap.exists()) return null;
+        if (!snap.exists()) {
+            return GLOBAL_API_KEY ? {
+                apiKey: GLOBAL_API_KEY,
+                senderPhone: '',
+                testPhone: TEST_PHONE,
+                modoTeste: false,
+                imageUrl: '',
+                pendingImageUrl: '',
+                birthdayAutomationEnabled: false,
+                birthdaySendTime: '09:00',
+                birthdayTemplateText: '',
+                birthdayDefaultImage: '',
+                birthdayAutomationTestMode: false,
+            } : null;
+        }
         const d = snap.data();
         return {
-            apiKey: d.apiKey || GLOBAL_API_KEY,
+            apiKey: resolveWhatsAppApiKey(d.apiKey),
             senderPhone: d.senderPhone || '',
             testPhone: d.testPhone || TEST_PHONE,
             modoTeste: d.modoTeste === true,
@@ -60,16 +71,6 @@ export async function loadWhatsAppConfig(): Promise<WhatsAppFullConfig | null> {
             birthdayTemplateText: d.birthdayTemplateText || '',
             birthdayDefaultImage: d.birthdayDefaultImage || '',
             birthdayAutomationTestMode: d.birthdayAutomationTestMode === true,
-            finAutoBeforeEnabled: d.finAutoBeforeEnabled === true,
-            finAutoBeforeDays: d.finAutoBeforeDays || 3,
-            finAutoOnDayEnabled: d.finAutoOnDayEnabled === true,
-            finAutoAfterEnabled: d.finAutoAfterEnabled === true,
-            finAutoAfterDays: d.finAutoAfterDays || 5,
-            finAutoTestMode: d.finAutoTestMode === true,
-            finAutoSendTime: d.finAutoSendTime || '09:00',
-            finAutoTestDate: d.finAutoTestDate || '',
-            finAutoTestTime: d.finAutoTestTime || '',
-            finAutoTestSentAt: d.finAutoTestSentAt || '',
         };
     } catch {
         return null;
@@ -333,8 +334,33 @@ export async function sendWhatsApp(
         ? `🧪 *[MODO TESTE]*\n_Destinatário original: ${phone}_\n\n${text}`
         : text;
 
-    const key = config.apiKey || GLOBAL_API_KEY;
+    const key = resolveWhatsAppApiKey(config.apiKey);
     if (!key) return { success: false, log: 'API Key não configurada.' };
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 10000);
+        const statusRes = await fetch(`${WHATSAPP_SERVICE_URL}/instance/connectionState/${INSTANCE_NAME}`, {
+            headers: {
+                'apikey': key,
+                'ApiKey': key
+            },
+            signal: controller.signal
+        });
+        window.clearTimeout(timeoutId);
+
+        if (!statusRes.ok) {
+            return { success: false, log: `NÃ£o foi possÃ­vel verificar a conexÃ£o do WhatsApp (HTTP ${statusRes.status}).` };
+        }
+
+        const statusJson = await statusRes.json();
+        const instanceState = statusJson.instance?.state || statusJson.state || 'desconhecido';
+        if (instanceState !== 'open') {
+            return { success: false, log: `WhatsApp nÃ£o conectado (${instanceState}). Reabra o painel e escaneie/confirme o QR Code antes de enviar.` };
+        }
+    } catch (error: any) {
+        return { success: false, log: `NÃ£o foi possÃ­vel confirmar a conexÃ£o do WhatsApp: ${error.message || 'erro desconhecido'}.` };
+    }
 
     const rawUrl = overrideImageUrl !== undefined ? overrideImageUrl : (config.imageUrl || '');
     const hasMedia = !!rawUrl && rawUrl.trim().length > 0;
@@ -419,18 +445,23 @@ export async function sendWhatsApp(
             return { success: true, log: config.modoTeste ? `✓ Enviado (teste)` : 'Enviado' };
         } else {
             const erroMsg = json.message || json.error || `Erro HTTP ${res.status}`;
+            const readableError = Array.isArray(erroMsg)
+                ? erroMsg.join(' | ')
+                : typeof erroMsg === 'object'
+                    ? JSON.stringify(erroMsg)
+                    : erroMsg;
             // Salvar erro
             await addDoc(collection(db, 'whatsapp_logs'), {
                 destinatario: destino,
                 mensagem: textoFinal,
                 status: 'ERRO',
-                erro: erroMsg,
+                erro: readableError,
                 dataHora: new Date().toISOString(),
                 tipo: hasMedia ? 'MEDIA' : 'TEXTO',
                 ...(alunoNome && { alunoNome }),
                 ...(alunoFotoUrl && { alunoFotoUrl })
             });
-            return { success: false, log: erroMsg };
+            return { success: false, log: readableError };
         }
     } catch (e: any) {
         // Log Falha
@@ -483,31 +514,3 @@ async function convertToMedia(url: string): Promise<{ content: string, mimeType:
     }
 }
 
-/**
- * Busca histórico do Firestore.
- */
-export async function fetchWhatsAppHistory(): Promise<any[]> {
-    try {
-        const q = query(
-            collection(db, 'whatsapp_logs'),
-            orderBy('dataHora', 'desc'),
-            limit(50)
-        );
-        const snap = await getDocs(q);
-        return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    } catch (e) {
-        console.error('Erro ao buscar histórico do WhatsApp:', e);
-        return [];
-    }
-}
-
-/**
- * Evolution API não usa fila externa como o Worker, o controle é interno da API.
- */
-export async function fetchWhatsAppQueue(_apiKey: string): Promise<null> {
-    return null;
-}
-
-export async function cancelWhatsAppQueue(_apiKey: string): Promise<boolean> {
-    return true;
-}

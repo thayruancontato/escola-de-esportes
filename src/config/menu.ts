@@ -112,16 +112,12 @@ export const ADMIN_MENU_ITEMS: MenuItem[] = [
         ]
     },
     {
-        path: '/admin/mensagens',
+        path: '/admin/mensagens/avisos-admin',
         label: 'Mensagens',
         icon: MessageSquare,
         subItems: [
-            { to: '/admin/mensagens', label: 'Disparos' },
-            { to: '/admin/mensagens/cobrancas', label: 'Cobrar Débitos' },
-            { to: '/admin/mensagens/fila', label: 'Fila' },
-            { to: '/admin/mensagens/historico', label: 'Histórico' },
-            { to: '/admin/mensagens/automacao', label: 'Automação' },
-            { to: '/admin/mensagens/configuracoes', label: 'Configurações' }
+            { to: '/admin/mensagens/avisos-admin', label: 'Avisos ao Administrador' },
+            { to: '/admin/financeiro/cobrancas', label: 'Cobrança Manual' }
         ]
     },
     {

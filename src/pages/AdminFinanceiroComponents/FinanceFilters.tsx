@@ -13,6 +13,7 @@ interface FinanceFiltersProps {
     onClearAll?: () => void;
     selectedCount?: number;
     onViewManualCharges?: () => void;
+    onVerifyInvoices?: () => void;
     loading: boolean;
     isSyncing?: boolean;
     readOnly?: boolean;
@@ -31,6 +32,7 @@ export function FinanceFilters({
     onClearAll,
     selectedCount = 0,
     onViewManualCharges,
+    onVerifyInvoices,
     loading,
     isSyncing,
     readOnly
@@ -177,6 +179,24 @@ export function FinanceFilters({
                         >
                             <RefreshCw size={18} className={isSyncing ? 'spin' : ''} />
                             {isSyncing ? '...' : 'Verificar Pagamentos'}
+                        </button>
+                    )}
+
+                    {!selectedCount && onVerifyInvoices && !readOnly && (
+                        <button
+                            onClick={onVerifyInvoices}
+                            disabled={isSyncing}
+                            style={{
+                                padding: '0 15px', height: '46px', borderRadius: '10px', border: '1px solid #006d77',
+                                background: '#e6fffa', color: '#006d77',
+                                cursor: isSyncing ? 'not-allowed' : 'pointer',
+                                display: 'flex', alignItems: 'center', gap: '8px',
+                                fontWeight: '700', fontSize: '0.85rem'
+                            }}
+                            title="Comparar faturas pagas no sistema com status real no Asaas"
+                        >
+                            <RefreshCw size={18} className={isSyncing ? 'spin' : ''} />
+                            Verificar Faturas
                         </button>
                     )}
                 </div>

@@ -54,6 +54,9 @@ export default function AdminDetails() {
                     .admin-details-page { padding: 0 5px !important; }
                     .admin-details-grid { gap: 8px !important; }
                 }
+                @media (max-width: 640px) {
+                    .admin-details-page { padding-bottom: 190px !important; }
+                }
             `}</style>
             {/* Delete Progress Overlay */}
             <DeleteOverlay
