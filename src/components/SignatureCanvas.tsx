@@ -4,9 +4,10 @@ import { Eraser, Check, PenTool } from 'lucide-react';
 interface SignatureCanvasProps {
     onConfirm: (signatureDataUrl: string) => void;
     onClear?: () => void;
+    saving?: boolean; // Desabilita os botões enquanto a assinatura é salva
 }
 
-export default function SignatureCanvas({ onConfirm, onClear }: SignatureCanvasProps) {
+export default function SignatureCanvas({ onConfirm, onClear, saving = false }: SignatureCanvasProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [hasSignature, setHasSignature] = useState(false);
     const [ctx, setCtx] = useState<CanvasRenderingContext2D | null>(null);
@@ -178,7 +179,7 @@ export default function SignatureCanvas({ onConfirm, onClear }: SignatureCanvasP
     };
 
     const handleConfirm = () => {
-        if (!canvasRef.current || !hasSignature) return;
+        if (!canvasRef.current || !hasSignature || saving) return;
         const dataUrl = canvasRef.current.toDataURL('image/png');
         onConfirm(dataUrl);
     };
@@ -237,6 +238,7 @@ export default function SignatureCanvas({ onConfirm, onClear }: SignatureCanvasP
             <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
                 <button
                     onClick={clearCanvas}
+                    disabled={saving}
                     style={{
                         flex: 1,
                         padding: '10px',
@@ -258,26 +260,26 @@ export default function SignatureCanvas({ onConfirm, onClear }: SignatureCanvasP
                 </button>
                 <button
                     onClick={handleConfirm}
-                    disabled={!hasSignature}
+                    disabled={!hasSignature || saving}
                     style={{
                         flex: 1,
                         padding: '10px',
-                        background: hasSignature ? '#00237f' : '#ccc',
+                        background: hasSignature && !saving ? '#00237f' : '#ccc',
                         border: 'none',
                         borderRadius: '8px',
                         color: '#fff',
                         fontWeight: 'bold',
-                        cursor: hasSignature ? 'pointer' : 'not-allowed',
+                        cursor: hasSignature && !saving ? 'pointer' : 'not-allowed',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
                         gap: '6px',
                         fontSize: '0.9rem',
-                        boxShadow: hasSignature ? '0 4px 10px rgba(0, 35, 127, 0.2)' : 'none'
+                        boxShadow: hasSignature && !saving ? '0 4px 10px rgba(0, 35, 127, 0.2)' : 'none'
                     }}
                 >
                     <Check size={16} />
-                    Confirmar
+                    {saving ? 'Salvando...' : 'Confirmar'}
                 </button>
             </div>
         </div>

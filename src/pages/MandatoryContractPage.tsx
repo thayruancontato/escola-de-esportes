@@ -1,12 +1,43 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { auth, db } from '../firebase';
-import { AlertCircle, CheckCircle, ChevronRight, LogOut } from 'lucide-react';
+import { AlertCircle, ChevronRight, LogOut } from 'lucide-react';
 import { collection, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
 import ContractEditor from '../components/contracts/ContractEditor';
 import SignatureCanvas from '../components/SignatureCanvas';
 import { signOut } from 'firebase/auth';
 import { notifyAdminContractSigned } from '../utils/adminNotifications';
+
+// Tempo máximo esperando o Firestore confirmar o salvamento (internet lenta/instável)
+const SAVE_TIMEOUT_MS = 20000;
+
+const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+// Busca, entre todas as matrículas do responsável, o primeiro aluno com contrato gerado e ainda sem assinatura
+const findFirstPendingSignature = async (email: string) => {
+    const normalizedEmail = email.toLowerCase().trim();
+    const q = query(collection(db, "uba_2026_registrations"), where("responsavel.email", "==", normalizedEmail));
+    const snap = await getDocs(q);
+
+    for (const d of snap.docs) {
+        const data = d.data();
+        // Only count if contract is marked as generated (default to true for legacy)
+        if (data.contractGenerated === false) continue;
+
+        const pendingIndex = (data.alunos || []).findIndex((a: any) => !a.signatureData);
+        if (pendingIndex !== -1) {
+            return { hasRegistrations: true, pending: { registrationId: d.id, data, index: pendingIndex } };
+        }
+    }
+
+    return { hasRegistrations: !snap.empty, pending: null };
+};
 
 
 export default function MandatoryContractPage() {
@@ -16,7 +47,6 @@ export default function MandatoryContractPage() {
     const [registrationId, setRegistrationId] = useState<string | null>(null);
     const [currentIndex, setCurrentIndex] = useState(0);
     const [showFullContract, setShowFullContract] = useState(false);
-    const [capturedSignature, setCapturedSignature] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
@@ -29,47 +59,17 @@ export default function MandatoryContractPage() {
             }
 
             try {
-                const normalizedEmail = user.email.toLowerCase().trim();
-                const q = query(collection(db, "uba_2026_registrations"), where("responsavel.email", "==", normalizedEmail));
-                const snap = await getDocs(q);
+                const { hasRegistrations, pending } = await findFirstPendingSignature(user.email);
 
-                if (!snap.empty) {
-                    let firstPendingReg: any = null;
-                    let firstPendingIdx = -1;
-                    let firstRegId = "";
-                    let totalPending = 0;
-
-                    // Search for the first registration that has pending signatures
-                    const allDocs = snap.docs;
-                    for (const d of allDocs) {
-                        const data = d.data();
-                        // Only count if contract is marked as generated (default to true for legacy)
-                        const isGenerated = data.contractGenerated !== false;
-                        if (!isGenerated) continue;
-
-                        const pendingIndices = (data.alunos || [])
-                            .map((a: any, i: number) => !a.signatureData ? i : -1)
-                            .filter((i: number) => i !== -1);
-
-                        totalPending += pendingIndices.length;
-
-                        if (firstPendingIdx === -1 && pendingIndices.length > 0) {
-                            firstPendingReg = data;
-                            firstPendingIdx = pendingIndices[0];
-                            firstRegId = d.id;
-                        }
-                    }
-
-                    if (!firstPendingReg) {
-                        // All students in all registrations are signed
-                        navigate('/aluno/dashboard');
-                    } else {
-                        setRegistrationId(firstRegId);
-                        setStudentData(firstPendingReg);
-                        setCurrentIndex(firstPendingIdx);
-                    }
-                } else {
+                if (!hasRegistrations) {
                     navigate('/aluno/login');
+                } else if (!pending) {
+                    // All students in all registrations are signed
+                    navigate('/aluno/dashboard');
+                } else {
+                    setRegistrationId(pending.registrationId);
+                    setStudentData(pending.data);
+                    setCurrentIndex(pending.index);
                 }
             } catch (error) {
                 console.error("Error checking contract:", error);
@@ -87,10 +87,14 @@ export default function MandatoryContractPage() {
         navigate('/aluno/login');
     };
 
-    // ... rest of the logic
-
     const handleSaveSignature = async (signatureDataUrl: string) => {
-        if (!registrationId || !studentData) return;
+        if (!registrationId || !studentData || saving) return;
+
+        if (!navigator.onLine) {
+            alert("Você está sem internet. Verifique sua conexão e toque em Confirmar novamente.");
+            return;
+        }
+
         setSaving(true);
 
         try {
@@ -102,7 +106,8 @@ export default function MandatoryContractPage() {
             };
 
             const docRef = doc(db, 'uba_2026_registrations', registrationId);
-            await updateDoc(docRef, { alunos: updatedAlunos });
+            // Sem o timeout, com internet ruim o updateDoc fica esperando indefinidamente e nada acontece na tela
+            await withTimeout(updateDoc(docRef, { alunos: updatedAlunos }), SAVE_TIMEOUT_MS);
 
             const nextPendingIndex = updatedAlunos.findIndex((a: any) => !a.signatureData);
 
@@ -110,39 +115,61 @@ export default function MandatoryContractPage() {
                 // Ainda há alunos sem assinar neste registro
                 setStudentData({ ...studentData, alunos: updatedAlunos });
                 setCurrentIndex(nextPendingIndex);
-                setCapturedSignature(null);
                 setShowFullContract(false);
                 window.scrollTo(0, 0);
                 alert("Assinatura salva! Temos mais um aluno pendente. Por favor, assine agora o contrato do próximo atleta.");
+                return;
+            }
+
+            // Todos os alunos deste registro assinaram — notifica o admin em background
+            const signedAluno = updatedAlunos[currentIndex];
+            const signedAt = signedAluno.signedAt as string;
+
+            // Busca dados completos do registro para montar a notificação
+            getDoc(doc(db, 'uba_2026_registrations', registrationId))
+                .then(snap => {
+                    if (!snap.exists()) return;
+                    const reg = snap.data() as any;
+                    const primeiroAluno = reg.alunos?.[0];
+                    notifyAdminContractSigned({
+                        registrationId,
+                        nome: primeiroAluno?.nome || updatedAlunos[0]?.nome || 'Aluno',
+                        modalidade: reg.modalidade,
+                        fotoUrl: primeiroAluno?.fotoUrl,
+                        responsavelNome: reg.responsavel?.nome,
+                        telefone: reg.responsavel?.telefonePrincipal,
+                        signedAt,
+                    }).catch(err => console.error('Falha ao notificar admin sobre contrato assinado:', err));
+                })
+                .catch(err => console.error('Falha ao buscar dados para notificação de contrato:', err));
+
+            // O responsável pode ter outra matrícula com contrato pendente (ex.: outra modalidade).
+            // Antes, ia para o painel, que redirecionava de volta para esta tela e parecia que a assinatura não tinha sido salva.
+            const email = auth.currentUser?.email;
+            const next = email
+                ? await findFirstPendingSignature(email).then(r => r.pending).catch(() => null)
+                : null;
+
+            if (next) {
+                setRegistrationId(next.registrationId);
+                setStudentData(next.data);
+                setCurrentIndex(next.index);
+                setShowFullContract(false);
+                window.scrollTo(0, 0);
+                const nextNome = next.data.alunos?.[next.index]?.nome || 'outro aluno';
+                const nextModalidade = next.data.modalidade ? ` (${next.data.modalidade})` : '';
+                alert(`Assinatura salva! Ainda falta assinar o contrato de ${nextNome}${nextModalidade}.`);
             } else {
-                // Todos os alunos deste registro assinaram — notifica o admin em background
-                const signedAluno = updatedAlunos[currentIndex];
-                const signedAt = signedAluno.signedAt as string;
-
-                // Busca dados completos do registro para montar a notificação
-                getDoc(doc(db, 'uba_2026_registrations', registrationId))
-                    .then(snap => {
-                        if (!snap.exists()) return;
-                        const reg = snap.data() as any;
-                        const primeiroAluno = reg.alunos?.[0];
-                        notifyAdminContractSigned({
-                            registrationId,
-                            nome: primeiroAluno?.nome || updatedAlunos[0]?.nome || 'Aluno',
-                            modalidade: reg.modalidade,
-                            fotoUrl: primeiroAluno?.fotoUrl,
-                            responsavelNome: reg.responsavel?.nome,
-                            telefone: reg.responsavel?.telefonePrincipal,
-                            signedAt,
-                        }).catch(err => console.error('Falha ao notificar admin sobre contrato assinado:', err));
-                    })
-                    .catch(err => console.error('Falha ao buscar dados para notificação de contrato:', err));
-
                 alert("Todas as assinaturas desta matrícula foram concluídas!");
                 navigate('/aluno/dashboard');
             }
-        } catch (error) {
+        } catch (error: any) {
             console.error("Erro ao salvar assinatura:", error);
-            alert("Erro ao salvar. Tente novamente.");
+            if (error?.message === 'timeout') {
+                alert("A internet está lenta e não conseguimos confirmar o salvamento. Verifique sua conexão e toque em Confirmar novamente.");
+            } else {
+                alert("Erro ao salvar a assinatura. Tente novamente.");
+            }
         } finally {
             setSaving(false);
         }
@@ -204,7 +231,9 @@ export default function MandatoryContractPage() {
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
                                     <div>
                                         <div style={{ fontSize: '0.7rem', color: '#718096', textTransform: 'uppercase' }}>Documento</div>
-                                        <div style={{ fontSize: '0.95rem', fontWeight: 'bold', color: '#2d3748' }}>Contrato Escolinha 2026</div>
+                                        <div style={{ fontSize: '0.95rem', fontWeight: 'bold', color: '#2d3748' }}>
+                                            Contrato Escolinha 2026{studentData?.modalidade ? ` · ${studentData.modalidade}` : ''}
+                                        </div>
                                     </div>
                                     <button
                                         onClick={() => setShowFullContract(true)}
@@ -223,30 +252,14 @@ export default function MandatoryContractPage() {
                             {/* Signature Section */}
                             <div style={{ marginTop: '15px', paddingTop: '15px', borderTop: '1px solid #eee' }}>
                                 <h3 style={{ fontSize: '0.95rem', marginBottom: '10px', color: '#333' }}>Sua Assinatura:</h3>
+                                {/* O "Confirmar" do canvas já salva direto. Antes ele só capturava a assinatura e o botão
+                                    de salvar aparecia abaixo, fora da tela no celular — parecia que nada acontecia.
+                                    A key recria o canvas limpo ao trocar de aluno/matrícula. */}
                                 <SignatureCanvas
-                                    onConfirm={(data) => setCapturedSignature(data)}
-                                    onClear={() => setCapturedSignature(null)}
+                                    key={`${registrationId}-${currentIndex}`}
+                                    onConfirm={handleSaveSignature}
+                                    saving={saving}
                                 />
-
-                                {capturedSignature && (
-                                    <div style={{ marginTop: '15px' }}>
-                                        <div style={{ marginBottom: '10px', fontSize: '0.8rem', color: '#2e7d32', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
-                                            <CheckCircle size={14} /> Assinatura capturada!
-                                        </div>
-                                        <button
-                                            onClick={() => handleSaveSignature(capturedSignature)}
-                                            disabled={saving}
-                                            style={{
-                                                background: '#2e7d32', color: '#fff', border: 'none',
-                                                padding: '12px 25px', borderRadius: '50px', fontSize: '1rem',
-                                                fontWeight: 'bold', cursor: 'pointer', width: '100%',
-                                                boxShadow: '0 4px 10px rgba(46, 125, 50, 0.2)'
-                                            }}
-                                        >
-                                            {saving ? 'SALVANDO...' : 'CONFIRMAR E FINALIZAR'}
-                                        </button>
-                                    </div>
-                                )}
                             </div>
                         </div>
                     </div>
